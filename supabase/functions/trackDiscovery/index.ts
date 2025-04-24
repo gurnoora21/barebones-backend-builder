@@ -3,7 +3,6 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, wait } from "../lib/spotifyClient.ts";
 
-// Define the message type for track discovery
 interface TrackDiscoveryMsg {
   albumId: string;
   albumName: string;
@@ -11,7 +10,6 @@ interface TrackDiscoveryMsg {
   offset?: number;
 }
 
-// Define CORS headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -19,7 +17,6 @@ const corsHeaders = {
 
 class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   constructor() {
-    // Use 60s visibility timeout
     super('track_discovery', 60);
   }
 
@@ -27,13 +24,50 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     const { albumId, albumName, artistId, offset = 0 } = msg;
     console.log(`Processing track discovery for album ${albumName} (${albumId}) with offset ${offset}`);
     
-    // Call Spotify API to get all tracks in the album
     const tracks = await getAlbumTracks(albumId, offset);
     console.log(`Found ${tracks.items.length} tracks in album ${albumName}`);
+
+    // Get album UUID from our database
+    const { data: album } = await this.supabase
+      .from('albums')
+      .select('id')
+      .eq('spotify_id', albumId)
+      .single();
+
+    if (!album) {
+      throw new Error(`Album ${albumId} not found in database`);
+    }
     
-    // Process each track (with a small delay between batches to avoid rate limiting)
     for (let i = 0; i < tracks.items.length; i++) {
       const track = tracks.items[i];
+      
+      // Insert or update track in our database
+      const { data: existingTrack } = await this.supabase
+        .from('tracks')
+        .select('id')
+        .eq('spotify_id', track.id)
+        .single();
+
+      if (!existingTrack) {
+        const { error: insertError } = await this.supabase
+          .from('tracks')
+          .insert({
+            spotify_id: track.id,
+            album_id: album.id,
+            name: track.name,
+            duration_ms: track.duration_ms,
+            metadata: {
+              source: 'spotify',
+              disc_number: track.disc_number,
+              track_number: track.track_number
+            }
+          });
+
+        if (insertError) {
+          console.error('Error inserting track:', insertError);
+          throw insertError;
+        }
+      }
       
       await this.enqueue('producer_identification', {
         trackId: track.id,
@@ -44,13 +78,11 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       
       console.log(`Enqueued producer identification for track: ${track.name} (${track.id})`);
       
-      // Add a small delay every 5 tracks to avoid hammering the API
       if (i > 0 && i % 5 === 0) {
         await wait(200);
       }
     }
     
-    // Handle pagination if needed
     if (offset + tracks.items.length < tracks.total) {
       const newOffset = offset + tracks.items.length;
       
@@ -68,17 +100,14 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   }
 }
 
-// Initialize the worker
 const worker = new TrackDiscoveryWorker();
 
 serve(async (req: Request) => {
-  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // Run the worker
     await worker.run();
     
     return new Response(JSON.stringify({ success: true }), { 
