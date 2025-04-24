@@ -1,73 +1,155 @@
-# Welcome to your Lovable project
 
-## Project info
+# Backend-Only Music Producer Discovery Pipeline
 
-**URL**: https://lovable.dev/projects/dbcf99ce-4778-4278-a26d-a6e103fdf90b
+A robust, backend-only pipeline that crawls Spotify data, identifies music producers, and enriches them with social media information. Built on Supabase with PGMQ queue system.
 
-## How can I edit this code?
+## Architecture
 
-There are several ways of editing your application.
+This system uses a page-worker pattern, where each worker:
+1. Reads exactly one message from PGMQ
+2. Processes the message
+3. Acknowledges/archives the message on success
+4. Manages errors with dead letter queues
 
-**Use Lovable**
+![Architecture Diagram](https://mermaid.ink/svg/pako:eNqNk8tu2zAQRX_FIJtWgGLY3gSlK6doswwMd9GFoYU0ImlSJSnDMPTvHcqO0zRBgHihebiHc-dBvypla1Xl1dHz4GSYiOLlGI9JMAHdooYHDuk0kOuM2Kh2Et_wZFTNsRpzg0EDzlnbfgcX8Clt0L_inmUEe1iu-5_2mdrt0H1TDyja6AGjUXfs5Rmm8k7KaIA8aOGhBhdoAgtJhGglT1BADJZ3PfmsRCOeB5y8XdnfP1cAN9B3CtQhVOTNnJnUXOAXyri0B9VoA9rR5u-JYge2pXnagNe5Mm-NJLLERA5c-kzkvNGxGVuOOzUeAuqbzVQVbY66avBpDpaNBK-cqMl4ZHYAJ5SwwKimmFbhHmw-xKc9ODtTlXwktF0lRduQc5r23b5ht_fU5p5UDE63O4bjDnRHSiJKhPDnHBn-Ap3RwkJuViJrE3UjdSds9APzTKujGPay4wVxF5OjFGM044e2Bmctb49flWGLJvQnypCV-FOu7XSJrDH5XcNJSwrLkJZslE5xeZzCSP45TuLOOd5inerQJm95wXNgW0k4i_wJdRjWRal0_u5l5sxvnc_tf1Cp0lRrpSoJzVkVFAtTLfND09TMXVUs63XZ1L8-NPXq-GE5X31U-ybHGwE=)
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/dbcf99ce-4778-4278-a26d-a6e103fdf90b) and start prompting.
+## Queue Structure
 
-Changes made via Lovable will be committed automatically to this repo.
+The system uses these PGMQ queues:
+- `artist_discovery`: Entry point, contains artist IDs or names to process
+- `album_discovery`: Album discovery tasks (artistId + offset)
+- `track_discovery`: Track discovery tasks for each album
+- `producer_identification`: Producer identification tasks for each track
+- `social_enrichment`: Social profile enrichment for identified producers
 
-**Use your preferred IDE**
+## Core Components
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+### Enhanced Base Classes
+- `PageWorker<Msg>`: Base class for all workers with resilience features
+- `RateLimiter`: Controls API request rates to avoid hitting limits
+- `CircuitBreaker`: Prevents calling failing services repeatedly
+- `MemoryCache`: Simple TTL cache for API responses
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+### Worker Functions
+All implemented as Supabase Edge Functions:
+- `artistDiscovery`: Entry point, resolves artist IDs and kickstarts pipeline
+- `albumDiscovery`: Gets artist's albums in pages of 50
+- `trackDiscovery`: Gets album tracks in pages of 50
+- `producerIdentification`: Identifies producers/collaborators for tracks
+- `socialEnrichment`: Enriches producer info with social profiles
 
-Follow these steps:
+### Utilities
+- `spotifyClient.ts`: Enhanced Spotify API client with rate limiting, caching, etc.
+- `maintenance`: Scheduled cleanup and recovery tasks
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+## Required Environment Variables
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+```
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SPOTIFY_CLIENT_ID=your-spotify-client-id
+SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 ```
 
-**Edit a file directly in GitHub**
+## Setup Instructions
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+1. **Create Database Tables and Functions**:
+   Run the SQL files in `/supabase/sql` in the following order:
+   - `create_rate_limits_table.sql`
+   - `setup_maintenance.sql`
+   - `setup_cron_jobs.sql`
 
-**Use GitHub Codespaces**
+2. **Set Environment Variables**:
+   Add the required secrets in Supabase Dashboard > Settings > API > Edge Functions.
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+3. **Deploy Edge Functions**:
+   The Edge Functions should deploy automatically with your code changes.
 
-## What technologies are used for this project?
+4. **Initialize Cron Jobs**:
+   Run this SQL command in Supabase SQL Editor:
+   ```sql
+   CALL schedule_worker_invocations();
+   ```
 
-This project is built with:
+## Testing the Pipeline
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+To manually trigger the process for a specific artist (e.g., Drake):
 
-## How can I deploy this project?
+```bash
+curl -X POST https://your-project-ref.supabase.co/functions/v1/artistDiscovery \
+  -H "Authorization: Bearer your-anon-key" \
+  -H "Content-Type: application/json" \
+  -d '{"artistName": "Drake"}'
+```
 
-Simply open [Lovable](https://lovable.dev/projects/dbcf99ce-4778-4278-a26d-a6e103fdf90b) and click on Share -> Publish.
+For Drake, you can also use his Spotify artist ID directly:
+```bash
+curl -X POST https://your-project-ref.supabase.co/functions/v1/artistDiscovery \
+  -H "Authorization: Bearer your-anon-key" \
+  -H "Content-Type: application/json" \
+  -d '{"artistId": "3TVXtAsR1Inumwj472S9r4"}'
+```
 
-## Can I connect a custom domain to my Lovable project?
+## Monitoring
 
-Yes, you can!
+1. **Queue Statistics**:
+   ```sql
+   SELECT * FROM queue_stats ORDER BY hour DESC;
+   ```
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+2. **Dead Letter Analysis**:
+   ```sql
+   SELECT * FROM dead_letter_analysis;
+   ```
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-tricks/custom-domain#step-by-step-guide)
+3. **Edge Function Logs**:
+   View logs in Supabase Dashboard > Edge Functions > [function name] > Logs
+
+4. **Rate Limit Status**:
+   ```sql
+   SELECT * FROM rate_limits;
+   ```
+
+5. **Maintenance Logs**:
+   ```sql
+   SELECT * FROM maintenance_logs ORDER BY timestamp DESC;
+   ```
+
+## Advanced Features
+
+The system includes these production-grade features:
+
+1. **Rate Limiting & Backpressure Control**:
+   - Fixed-window rate limiting with DB storage
+   - Concurrency limits to prevent overloading
+   - Dynamic backoff based on response headers
+
+2. **Circuit Breaker Pattern**:
+   - Prevents hammering failing services
+   - Auto-resets after cooldown period
+   - State tracking (CLOSED, OPEN, HALF-OPEN)
+
+3. **Enhanced Error Handling**:
+   - Error categorization by type
+   - Retryable vs. non-retryable distinction
+   - Timeout controls for all operations
+
+4. **Caching Layer**:
+   - In-memory TTL cache for API responses
+   - Per-endpoint TTL configuration
+   - Automatic cache invalidation
+
+5. **Maintenance Tasks**:
+   - Scheduled cleanup of expired records
+   - Detection and handling of stalled messages
+   - Health checks and monitoring
+
+6. **Observability**:
+   - Detailed structured logging
+   - Performance metrics collection
+   - Error aggregation and analysis
+
+7. **Schema Validation**:
+   - Message schema validation
+   - Strong typing with TypeScript
+   - Dead-letter handling of invalid messages
