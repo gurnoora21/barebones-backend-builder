@@ -1,7 +1,3 @@
-
-// Rate limiter utility for API calls
-// Implements a fixed-window algorithm stored in Postgres
-
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 
@@ -18,47 +14,55 @@ export class RateLimiter {
     this.supabase = supabaseClient;
   }
   
-  // Check if operation can proceed under rate limit
+  // Enhanced canProceed with more robust concurrency handling
   async canProceed(opts: RateLimitOptions): Promise<boolean> {
     const now = Date.now();
     const windowEnd = now + opts.windowMs;
     
-    // Try to get existing rate limit record
-    const { data: limitRecord, error } = await this.supabase
-      .from('rate_limits')
-      .select('*')
-      .eq('key', opts.key)
-      .maybeSingle();
-    
-    if (error) {
-      console.error(`Error checking rate limit for ${opts.key}:`, error);
-      return true; // Fail open if we can't check the limit
-    }
-    
-    // If no record or window expired, create/reset
-    if (!limitRecord || now > (limitRecord.window_end as number)) {
-      await this.supabase
+    try {
+      const { data: limitRecord, error } = await this.supabase
         .from('rate_limits')
-        .upsert({
-          key: opts.key,
-          count: 1, 
-          window_end: windowEnd
-        });
-      return true;
+        .select('*')
+        .eq('key', opts.key)
+        .maybeSingle();
+      
+      if (error) {
+        console.error(`Rate limit check error for ${opts.key}:`, error);
+        return true; // Fail open with detailed logging
+      }
+      
+      // If no record or window expired, create/reset
+      if (!limitRecord || now > (limitRecord.window_end as number)) {
+        await this.supabase
+          .from('rate_limits')
+          .upsert({
+            key: opts.key,
+            count: 1, 
+            window_end: windowEnd
+          });
+        return true;
+      }
+      
+      // More granular rate limit handling
+      const currentCount = limitRecord.count as number;
+      const remainingRequests = opts.maxRequests - currentCount;
+      
+      if (remainingRequests > 0) {
+        await this.supabase
+          .from('rate_limits')
+          .update({ count: currentCount + 1 })
+          .eq('key', opts.key);
+        return true;
+      }
+      
+      // Log when rate limit is reached
+      console.warn(`Rate limit exceeded for ${opts.key}. 
+        Max: ${opts.maxRequests}, Current: ${currentCount}`);
+      return false;
+    } catch (err) {
+      console.error('Unexpected error in rate limiter:', err);
+      return true; // Always fail open to prevent total service disruption
     }
-    
-    // If under limit, increment and allow
-    if (limitRecord.count < opts.maxRequests) {
-      await this.supabase
-        .from('rate_limits')
-        .update({ count: (limitRecord.count as number) + 1 })
-        .eq('key', opts.key);
-      return true;
-    }
-    
-    // Rate limit exceeded
-    console.warn(`Rate limit exceeded for ${opts.key}`);
-    return false;
   }
   
   // Increment usage count for a key

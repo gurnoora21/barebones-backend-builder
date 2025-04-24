@@ -48,6 +48,13 @@ export type Database = {
             referencedRelation: "artists"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "fk_albums_artist"
+            columns: ["artist_id"]
+            isOneToOne: false
+            referencedRelation: "artists"
+            referencedColumns: ["id"]
+          },
         ]
       }
       artists: {
@@ -103,6 +110,20 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "fk_normalized_tracks_artist"
+            columns: ["artist_id"]
+            isOneToOne: false
+            referencedRelation: "artists"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_normalized_tracks_track"
+            columns: ["representative_track_id"]
+            isOneToOne: false
+            referencedRelation: "tracks"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "normalized_tracks_artist_id_fkey"
             columns: ["artist_id"]
@@ -200,6 +221,30 @@ export type Database = {
         }
         Relationships: []
       }
+      rate_limits: {
+        Row: {
+          count: number
+          created_at: string | null
+          key: string
+          updated_at: string | null
+          window_end: number
+        }
+        Insert: {
+          count?: number
+          created_at?: string | null
+          key: string
+          updated_at?: string | null
+          window_end: number
+        }
+        Update: {
+          count?: number
+          created_at?: string | null
+          key?: string
+          updated_at?: string | null
+          window_end?: number
+        }
+        Relationships: []
+      }
       traces: {
         Row: {
           attributes: Json | null
@@ -266,6 +311,20 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "fk_track_producers_producer"
+            columns: ["producer_id"]
+            isOneToOne: false
+            referencedRelation: "producers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_track_producers_track"
+            columns: ["track_id"]
+            isOneToOne: false
+            referencedRelation: "tracks"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "track_producers_producer_id_fkey"
             columns: ["producer_id"]
             isOneToOne: false
@@ -313,6 +372,13 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "fk_tracks_album"
+            columns: ["album_id"]
+            isOneToOne: false
+            referencedRelation: "albums"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "tracks_album_id_fkey"
             columns: ["album_id"]

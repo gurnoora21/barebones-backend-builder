@@ -3,7 +3,7 @@ import { Database } from '../types.ts';
 import { globalCache } from './cache.ts';
 import { CircuitBreakerRegistry } from './circuitBreaker.ts';
 
-// Error categories for better handling
+// Enhanced error categorization
 export enum ErrorCategory {
   NETWORK = 'network',
   TIMEOUT = 'timeout',
@@ -11,7 +11,9 @@ export enum ErrorCategory {
   VALIDATION = 'validation',
   RATE_LIMIT = 'rate_limit',
   NOT_FOUND = 'not_found',
-  UNKNOWN = 'unknown'
+  UNKNOWN = 'unknown',
+  MISSING_RECORD = 'missing_record',
+  UNKNOWN_PRODUCER = 'unknown_producer'
 }
 
 export interface ErrorDetails {
@@ -386,6 +388,24 @@ export abstract class PageWorker<Msg> {
 
   // Helper method to categorize errors
   protected categorizeError(err: any): ErrorDetails {
+    const originalError = this.defaultCategorizeError(err);
+
+    // Add more specific error categorization
+    if (err.message?.includes('No record found') || 
+        err.code === 'PGRST116') {
+      return {
+        ...originalError,
+        category: ErrorCategory.MISSING_RECORD,
+        retryable: false
+      };
+    }
+
+    // You can add more specific error categorizations here
+    return originalError;
+  }
+
+  // Extract the original categorizeError logic into a method
+  private defaultCategorizeError(err: any): ErrorDetails {
     const errorMessage = err.message || String(err);
     
     // Network/connection errors
@@ -462,7 +482,7 @@ export abstract class PageWorker<Msg> {
       originalError: err
     };
   }
-  
+
   // Generate a unique worker ID for tracking in logs
   protected getWorkerId(): string {
     if (!this._workerId) {
@@ -479,5 +499,41 @@ export abstract class PageWorker<Msg> {
   // Generate a unique span ID
   protected generateSpanId(): string {
     return Math.random().toString(36).substring(2, 16);
+  }
+
+  // Enhanced metadata tracking for producers
+  protected mergeMetadata(
+    existingMetadata: any, 
+    newMetadata: any, 
+    role: string = 'producer'
+  ): any {
+    const mergedMetadata = { ...existingMetadata };
+
+    // Merge external IDs
+    if (newMetadata.external_ids) {
+      mergedMetadata.external_ids = [
+        ...new Set([
+          ...(existingMetadata?.external_ids || []), 
+          ...newMetadata.external_ids
+        ])
+      ];
+    }
+
+    // Add roles if not already present
+    if (role === 'collaborator' || role === 'producer') {
+      const roles = new Set(existingMetadata?.roles || []);
+      roles.add(role);
+      mergedMetadata.roles = Array.from(roles);
+    }
+
+    // Merge other metadata fields
+    return {
+      ...mergedMetadata,
+      ...newMetadata,
+      sources: [
+        ...(existingMetadata?.sources || []),
+        ...(newMetadata.sources || [])
+      ]
+    };
   }
 }
