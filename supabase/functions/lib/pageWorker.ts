@@ -1,7 +1,8 @@
+
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 import { globalCache } from './cache.ts';
-import { CircuitBreakerRegistry } from './circuitBreaker.ts';
+import { CircuitBreakerRegistry, CircuitState } from './circuitBreaker.ts';
 
 // Enhanced error categorization
 export enum ErrorCategory {
@@ -13,7 +14,11 @@ export enum ErrorCategory {
   NOT_FOUND = 'not_found',
   UNKNOWN = 'unknown',
   MISSING_RECORD = 'missing_record',
-  UNKNOWN_PRODUCER = 'unknown_producer'
+  UNKNOWN_PRODUCER = 'unknown_producer',
+  DATABASE_ERROR = 'database_error',
+  CONNECTION_ERROR = 'connection_error',
+  TRANSIENT_ERROR = 'transient_error',
+  PERMANENT_ERROR = 'permanent_error'
 }
 
 export interface ErrorDetails {
@@ -21,6 +26,8 @@ export interface ErrorDetails {
   retryable: boolean; // Whether this error can be retried
   message: string;
   originalError?: Error;
+  stack?: string;
+  context?: Record<string, any>;
 }
 
 // Trace context for distributed tracing
@@ -34,6 +41,13 @@ export interface TraceContext {
   attributes: Record<string, string | number | boolean>;
 }
 
+// Enhanced DLQ handling options
+export interface DLQOptions {
+  maxRetries: number;         // Maximum retries before sending to DLQ
+  retryDelayBaseMs: number;   // Base delay for retries (will be multiplied by retry count)
+  categorizeForAutoRetry?: (error: ErrorDetails) => boolean; // Function to determine if error should be auto-retried
+}
+
 export abstract class PageWorker<Msg> {
   protected supabase: SupabaseClient<Database>;
   protected queueName: string;
@@ -41,11 +55,19 @@ export abstract class PageWorker<Msg> {
   protected startTime: number;
   protected traceContext?: TraceContext;
   private _workerId: string | undefined;
+  protected dlqOptions: DLQOptions;
 
-  constructor(queueName: string, vtSeconds = 60) {
+  constructor(queueName: string, vtSeconds = 60, dlqOptions?: Partial<DLQOptions>) {
     this.queueName = queueName;
     this.vtSeconds = vtSeconds;
     this.startTime = Date.now();
+    
+    // Default DLQ options
+    this.dlqOptions = {
+      maxRetries: 5,
+      retryDelayBaseMs: 1000,
+      ...dlqOptions
+    };
     
     // Initialize Supabase client with service role key
     this.supabase = createClient<Database>(
@@ -95,6 +117,15 @@ export abstract class PageWorker<Msg> {
         extractedTraceContext = (msg as any).traceContext;
       }
       
+      // Log queue metrics
+      await this.logQueueMetric('dequeued', row.msg_id, {
+        read_count: row.read_ct,
+        queue_name: this.queueName,
+        worker_id: this.getWorkerId(),
+        dequeue_time: Date.now(),
+        trace_id: extractedTraceContext?.traceId
+      });
+      
       return {
         msgId: row.msg_id,
         msg: msg,
@@ -109,7 +140,8 @@ export abstract class PageWorker<Msg> {
       await this.logError(0, categorizedError);
       
       // For connection errors, wait before retry
-      if (categorizedError.category === ErrorCategory.NETWORK) {
+      if (categorizedError.category === ErrorCategory.NETWORK || 
+          categorizedError.category === ErrorCategory.CONNECTION_ERROR) {
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
       
@@ -123,7 +155,7 @@ export abstract class PageWorker<Msg> {
   // Validate message schema (can be overridden by subclasses)
   protected validateMessage(msg: Msg): boolean {
     // Basic validation - ensure msg is not null/undefined
-    // Subclasses can implement more specific validation
+    // Subclasses should implement more specific validation
     return msg !== null && msg !== undefined;
   }
 
@@ -155,11 +187,38 @@ export abstract class PageWorker<Msg> {
         }
       });
       
+      // Log queue metrics
+      await this.logQueueMetric('completed', msgId, {
+        status: 'success',
+        queue_name: this.queueName,
+        worker_id: this.getWorkerId(),
+        processing_time_ms: processingTime,
+        trace_id: this.traceContext?.traceId
+      });
+      
       console.log(`Successfully archived message ${msgId} from queue ${this.queueName} in ${processingTime}ms`);
     } catch (err) {
       console.error(`Failed to acknowledge message ${msgId}:`, err);
       // We'll still consider the message processed, but the ack failed
       // It will eventually reappear in the queue after VT expires
+    }
+  }
+
+  // Log queue monitoring metrics
+  private async logQueueMetric(action: string, msgId: number, details: any): Promise<void> {
+    try {
+      await this.supabase.from('queue_depth_metrics').insert({
+        queue_name: this.queueName,
+        msg_id: msgId,
+        action,
+        details: {
+          ...details,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } catch (err) {
+      // Don't fail if we can't log metrics
+      console.error(`Failed to log queue metric for ${action}:`, err);
     }
   }
 
@@ -187,6 +246,15 @@ export abstract class PageWorker<Msg> {
         throw this.categorizeError(error);
       }
       
+      // Log queue metrics
+      await this.logQueueMetric('enqueued', data, {
+        source_queue: this.queueName,
+        target_queue: queueName,
+        worker_id: this.getWorkerId(),
+        enqueue_time: Date.now(),
+        trace_id: this.traceContext?.traceId
+      });
+      
       console.log(`Successfully enqueued message to ${queueName}, msg_id: ${data}`);
       return data;
     } catch (err) {
@@ -201,6 +269,7 @@ export abstract class PageWorker<Msg> {
     console.log(`Moving message ${msgId} to dead letter queue after ${readCt} failures`);
     
     try {
+      // Enhanced DLQ entry with more context
       await this.supabase.from('pgmq_dead_letter_items').insert({
         queue_name: this.queueName,
         msg: msg,
@@ -208,6 +277,9 @@ export abstract class PageWorker<Msg> {
         details: { 
           error: error.message,
           category: error.category,
+          stack: error.stack || new Error().stack,
+          context: error.context || {},
+          retryable: error.retryable,
           time: new Date().toISOString(),
           worker_instance: this.getWorkerId(),
           trace_id: this.traceContext?.traceId
@@ -216,6 +288,15 @@ export abstract class PageWorker<Msg> {
       
       // Archive the message so it doesn't reappear in the queue
       await this.ack(msgId);
+      
+      // Log queue metrics
+      await this.logQueueMetric('dead_letter', msgId, {
+        queue_name: this.queueName,
+        fail_count: readCt,
+        error_category: error.category,
+        worker_id: this.getWorkerId(),
+        trace_id: this.traceContext?.traceId
+      });
       
       console.log(`Successfully moved message ${msgId} to dead letter queue`);
     } catch (err) {
@@ -236,12 +317,25 @@ export abstract class PageWorker<Msg> {
         details: { 
           error: error.message,
           category: error.category,
+          stack: error.stack || new Error().stack,
+          context: error.context || {},
           retryable: error.retryable,
           time: new Date().toISOString(),
           worker_instance: this.getWorkerId(),
           trace_id: this.traceContext?.traceId
         }
       });
+      
+      // Log queue metrics
+      if (msgId > 0) {
+        await this.logQueueMetric('error', msgId, {
+          queue_name: this.queueName,
+          error_category: error.category,
+          retryable: error.retryable,
+          worker_id: this.getWorkerId(),
+          trace_id: this.traceContext?.traceId
+        });
+      }
     } catch (err) {
       console.error(`Failed to log error for message ${msgId}:`, err);
       // Non-critical, continue
@@ -300,7 +394,9 @@ export abstract class PageWorker<Msg> {
       await this.recordTrace(operationContext, {
         status: "error",
         duration_ms: duration,
-        error: error.message || String(error)
+        error: error.message || String(error),
+        error_category: error.category || ErrorCategory.UNKNOWN,
+        stack: error.stack || new Error().stack
       });
       
       throw error;
@@ -329,7 +425,7 @@ export abstract class PageWorker<Msg> {
     }
   }
 
-  // Main runner method - read one, process, ack if success, handle errors
+  // Main runner method with improved error handling and retry logic
   async run(): Promise<void> {
     console.log(`Running page-worker for queue: ${this.queueName}`);
     this.startTime = Date.now();
@@ -359,15 +455,24 @@ export abstract class PageWorker<Msg> {
     console.log(`[Trace:${this.traceContext.traceId}] Processing message ${msgId} from queue ${this.queueName}`);
     
     try {
-      await this.traceOperation('process', async () => {
-        // Apply timeout to processing
-        const timeout = 30000; // 30 second timeout
-        const processPromise = this.process(msg);
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
+      // Use circuit breaker pattern for processing
+      const circuitBreaker = CircuitBreakerRegistry.getOrCreate({
+        name: `queue-${this.queueName}`,
+        failureThreshold: 5,
+        resetTimeoutMs: 60000 // 1 minute
+      });
+      
+      await circuitBreaker.fire(async () => {
+        await this.traceOperation('process', async () => {
+          // Apply timeout to processing
+          const timeout = 30000; // 30 second timeout
+          const processPromise = this.process(msg);
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
+          });
+          
+          await Promise.race([processPromise, timeoutPromise]);
         });
-        
-        await Promise.race([processPromise, timeoutPromise]);
       });
       
       await this.ack(msgId);
@@ -377,12 +482,68 @@ export abstract class PageWorker<Msg> {
       const error = this.categorizeError(err);
       
       // If too many retries or non-retryable error, move to dead-letter
-      if (readCt >= 5 || !error.retryable) {
+      if (readCt >= this.dlqOptions.maxRetries || !error.retryable) {
         await this.moveToDeadLetter(msgId, msg, readCt + 1, error);
       } else {
-        // Log the error and leave the message (it will reappear after vt)
-        await this.logError(msgId, error);
+        // Check if this error category should be auto-retried based on custom logic
+        const shouldAutoRetry = this.dlqOptions.categorizeForAutoRetry ? 
+          this.dlqOptions.categorizeForAutoRetry(error) :
+          this.shouldRetryError(error);
+          
+        if (shouldAutoRetry) {
+          // Calculate exponential backoff
+          const delayMs = this.dlqOptions.retryDelayBaseMs * Math.pow(2, Math.min(readCt, 8));
+          console.log(`Scheduling retry for message ${msgId} with backoff delay ${delayMs}ms`);
+          
+          // We could implement a delayed retry here if the queue supports it
+          // For now, we just log and let the VT expire
+          await this.logError(msgId, {
+            ...error,
+            context: {
+              ...(error.context || {}),
+              retry_count: readCt,
+              next_retry_delay_ms: delayMs
+            }
+          });
+        } else {
+          // Not eligible for auto-retry, move to dead letter
+          await this.moveToDeadLetter(msgId, msg, readCt + 1, {
+            ...error,
+            context: {
+              ...(error.context || {}),
+              retry_ineligible: true,
+              retry_count: readCt
+            }
+          });
+        }
       }
+    }
+  }
+
+  // Determine if an error should be retried based on its category
+  protected shouldRetryError(error: ErrorDetails): boolean {
+    // By default, follow the retryable flag on the error
+    if (error.retryable !== undefined) {
+      return error.retryable;
+    }
+    
+    // Default retry strategy based on error category
+    switch (error.category) {
+      case ErrorCategory.NETWORK:
+      case ErrorCategory.TIMEOUT:
+      case ErrorCategory.RATE_LIMIT:
+      case ErrorCategory.CONNECTION_ERROR:
+      case ErrorCategory.TRANSIENT_ERROR:
+        return true;
+      case ErrorCategory.AUTH:
+      case ErrorCategory.VALIDATION:
+      case ErrorCategory.NOT_FOUND:
+      case ErrorCategory.MISSING_RECORD:
+      case ErrorCategory.PERMANENT_ERROR:
+        return false;
+      case ErrorCategory.UNKNOWN:
+      default:
+        return true; // Default to retry for unknown errors
     }
   }
 
@@ -399,6 +560,39 @@ export abstract class PageWorker<Msg> {
         retryable: false
       };
     }
+    
+    if (err.message?.includes('Rate limit exceeded') ||
+        err.status === 429) {
+      return {
+        ...originalError, 
+        category: ErrorCategory.RATE_LIMIT,
+        retryable: true,
+        context: {
+          retry_after: err.headers?.['retry-after'] || 60
+        }
+      };
+    }
+    
+    if (err.message?.includes('Connection') ||
+        err.message?.includes('network')) {
+      return {
+        ...originalError,
+        category: ErrorCategory.CONNECTION_ERROR,
+        retryable: true
+      };
+    }
+    
+    if (err.code?.startsWith('23') || // Postgres integrity violation
+        err.message?.includes('duplicate key')) {
+      return {
+        ...originalError,
+        category: ErrorCategory.DATABASE_ERROR,
+        retryable: false,
+        context: {
+          pg_code: err.code
+        }
+      };
+    }
 
     // You can add more specific error categorizations here
     return originalError;
@@ -407,6 +601,7 @@ export abstract class PageWorker<Msg> {
   // Extract the original categorizeError logic into a method
   private defaultCategorizeError(err: any): ErrorDetails {
     const errorMessage = err.message || String(err);
+    const errorStack = err.stack || new Error().stack;
     
     // Network/connection errors
     if (
@@ -418,6 +613,7 @@ export abstract class PageWorker<Msg> {
         category: ErrorCategory.NETWORK,
         retryable: true,
         message: errorMessage,
+        stack: errorStack,
         originalError: err
       };
     }
@@ -431,6 +627,7 @@ export abstract class PageWorker<Msg> {
         category: ErrorCategory.TIMEOUT,
         retryable: true,
         message: errorMessage,
+        stack: errorStack,
         originalError: err
       };
     }
@@ -446,6 +643,7 @@ export abstract class PageWorker<Msg> {
         category: ErrorCategory.AUTH,
         retryable: false, // Auth errors generally need manual intervention
         message: errorMessage,
+        stack: errorStack,
         originalError: err
       };
     }
@@ -460,7 +658,11 @@ export abstract class PageWorker<Msg> {
         category: ErrorCategory.RATE_LIMIT,
         retryable: true,
         message: errorMessage,
-        originalError: err
+        stack: errorStack,
+        originalError: err,
+        context: {
+          retry_after: err.headers?.['retry-after'] || 60
+        }
       };
     }
     
@@ -470,6 +672,7 @@ export abstract class PageWorker<Msg> {
         category: ErrorCategory.NOT_FOUND,
         retryable: false, // Not found usually doesn't fix itself
         message: errorMessage,
+        stack: errorStack,
         originalError: err
       };
     }
@@ -479,6 +682,7 @@ export abstract class PageWorker<Msg> {
       category: ErrorCategory.UNKNOWN,
       retryable: true,
       message: errorMessage,
+      stack: errorStack,
       originalError: err
     };
   }
@@ -535,5 +739,48 @@ export abstract class PageWorker<Msg> {
         ...(newMetadata.sources || [])
       ]
     };
+  }
+  
+  // Utility method for handling retryable operations with exponential backoff
+  protected async withRetry<T>(
+    operation: () => Promise<T>,
+    options: {
+      name: string;
+      maxRetries?: number;
+      baseDelayMs?: number;
+      maxDelayMs?: number;
+    }
+  ): Promise<T> {
+    const { name, maxRetries = 3, baseDelayMs = 200, maxDelayMs = 10000 } = options;
+    let lastError: any;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        const categorizedError = this.categorizeError(error);
+        
+        // Don't retry non-retryable errors
+        if (!categorizedError.retryable) {
+          console.error(`Non-retryable error in ${name}, giving up:`, categorizedError);
+          throw error;
+        }
+        
+        if (attempt < maxRetries) {
+          // Calculate exponential backoff with jitter
+          const delay = Math.min(
+            maxDelayMs,
+            baseDelayMs * Math.pow(2, attempt) * (0.8 + Math.random() * 0.4)
+          );
+          
+          console.log(`Retrying ${name} after error, attempt ${attempt + 1}/${maxRetries}, delay: ${delay}ms:`, categorizedError.message);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    console.error(`${name} failed after ${maxRetries} retries`);
+    throw lastError;
   }
 }
