@@ -1,6 +1,6 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { BaseWorker } from "../lib/baseWorker.ts";
+import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, wait } from "../lib/spotifyClient.ts";
 
 // Define the message type for track discovery
@@ -8,6 +8,7 @@ interface TrackDiscoveryMsg {
   albumId: string;
   albumName: string;
   artistId: string;
+  offset?: number;
 }
 
 // Define CORS headers
@@ -16,32 +17,29 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-class TrackDiscoveryWorker extends BaseWorker<TrackDiscoveryMsg> {
+class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   constructor() {
-    // Use 60s visibility timeout and batch size of 10
-    super('track_discovery', 60, 10);
+    // Use 60s visibility timeout
+    super('track_discovery', 60);
   }
 
-  protected async processMessage(msg: TrackDiscoveryMsg, msgId: number): Promise<void> {
-    const { albumId, albumName, artistId } = msg;
-    console.log(`Processing track discovery for album ${albumName} (${albumId})`);
+  protected async process(msg: TrackDiscoveryMsg): Promise<void> {
+    const { albumId, albumName, artistId, offset = 0 } = msg;
+    console.log(`Processing track discovery for album ${albumName} (${albumId}) with offset ${offset}`);
     
     // Call Spotify API to get all tracks in the album
-    const tracks = await getAlbumTracks(albumId);
-    console.log(`Found ${tracks.length} tracks in album ${albumName}`);
+    const tracks = await getAlbumTracks(albumId, offset);
+    console.log(`Found ${tracks.items.length} tracks in album ${albumName}`);
     
     // Process each track (with a small delay between batches to avoid rate limiting)
-    for (let i = 0; i < tracks.length; i++) {
-      const track = tracks[i];
+    for (let i = 0; i < tracks.items.length; i++) {
+      const track = tracks.items[i];
       
-      await this.supabase.rpc('pgmq_send', {
-        queue_name: 'producer_identification',
-        msg: {
-          trackId: track.id,
-          trackName: track.name,
-          albumId,
-          artistId
-        }
+      await this.enqueue('producer_identification', {
+        trackId: track.id,
+        trackName: track.name,
+        albumId,
+        artistId
       });
       
       console.log(`Enqueued producer identification for track: ${track.name} (${track.id})`);
@@ -52,7 +50,21 @@ class TrackDiscoveryWorker extends BaseWorker<TrackDiscoveryMsg> {
       }
     }
     
-    console.log(`Finished processing all tracks for album ${albumName}`);
+    // Handle pagination if needed
+    if (offset + tracks.items.length < tracks.total) {
+      const newOffset = offset + tracks.items.length;
+      
+      await this.enqueue('track_discovery', {
+        albumId,
+        albumName,
+        artistId,
+        offset: newOffset
+      });
+      
+      console.log(`Enqueued next page of tracks for album ${albumName} with offset ${newOffset}`);
+    } else {
+      console.log(`Finished processing all tracks for album ${albumName}`);
+    }
   }
 }
 

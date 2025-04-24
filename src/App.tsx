@@ -15,7 +15,7 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <Routes>
-          {/* Removed Index route */}
+          {/* This is a backend-only application. No frontend routes needed. */}
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>

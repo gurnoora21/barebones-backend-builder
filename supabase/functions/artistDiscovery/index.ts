@@ -1,7 +1,6 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
-import { BaseWorker } from "../lib/baseWorker.ts";
+import { PageWorker } from "../lib/pageWorker.ts";
 import { getSpotifyArtistId } from "../lib/spotifyClient.ts";
 
 // Define the message type for artist discovery
@@ -16,13 +15,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-class ArtistDiscoveryWorker extends BaseWorker<ArtistDiscoveryMsg> {
+class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
   constructor() {
-    // Use 60s visibility timeout and batch size of 2
-    super('artist_discovery', 60, 2);
+    // Use 60s visibility timeout
+    super('artist_discovery', 60);
   }
 
-  protected async processMessage(msg: ArtistDiscoveryMsg, msgId: number): Promise<void> {
+  protected async process(msg: ArtistDiscoveryMsg): Promise<void> {
     console.log(`Processing artist discovery message:`, msg);
     
     let artistId = msg.artistId;
@@ -46,12 +45,9 @@ class ArtistDiscoveryWorker extends BaseWorker<ArtistDiscoveryMsg> {
     // Enqueue album discovery with offset 0
     const albumMsg = { artistId, offset: 0 };
     
-    const result = await this.supabase.rpc('pgmq_send', {
-      queue_name: 'album_discovery',
-      msg: albumMsg
-    });
+    await this.enqueue('album_discovery', albumMsg);
     
-    console.log(`Enqueued album discovery task for artist ${artistId}, result: ${result}`);
+    console.log(`Enqueued album discovery task for artist ${artistId}`);
   }
 }
 
@@ -76,15 +72,14 @@ serve(async (req: Request) => {
             artistName: body.artistName
           };
           
-          const result = await worker.supabase.rpc('pgmq_send', {
-            queue_name: 'artist_discovery',
-            msg: message
-          });
+          await worker.enqueue('artist_discovery', message);
           
-          console.log(`Manually enqueued artist discovery task, result: ${result}`);
+          console.log(`Manually enqueued artist discovery task`);
+          return new Response(JSON.stringify({ success: true, message: 'Artist discovery task enqueued' }), { 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
         }
       } catch (e) {
-        // If body parsing fails, just continue with the worker run
         console.log("No valid JSON body or not adding a manual message");
       }
     }

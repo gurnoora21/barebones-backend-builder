@@ -1,6 +1,6 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { BaseWorker } from "../lib/baseWorker.ts";
+import { PageWorker } from "../lib/pageWorker.ts";
 import { getTrackDetails } from "../lib/spotifyClient.ts";
 
 // Define the message type for producer identification
@@ -17,13 +17,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-class ProducerIdentificationWorker extends BaseWorker<ProducerIdentificationMsg> {
+class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg> {
   constructor() {
-    // Use 60s visibility timeout and batch size of 5
-    super('producer_identification', 60, 5);
+    // Use 60s visibility timeout
+    super('producer_identification', 60);
   }
 
-  protected async processMessage(msg: ProducerIdentificationMsg, msgId: number): Promise<void> {
+  protected async process(msg: ProducerIdentificationMsg): Promise<void> {
     const { trackId, trackName, albumId, artistId } = msg;
     console.log(`Processing producer identification for track ${trackName} (${trackId})`);
     
@@ -34,9 +34,8 @@ class ProducerIdentificationWorker extends BaseWorker<ProducerIdentificationMsg>
     // Process each artist/collaborator
     for (const artist of track.artists) {
       if (artist.id !== artistId) {  // Skip the main artist
-        await this.supabase.rpc('pgmq_send', {
-          queue_name: 'social_enrichment',
-          msg: { producerName: artist.name }
+        await this.enqueue('social_enrichment', { 
+          producerName: artist.name 
         });
         
         console.log(`Enqueued social enrichment for producer: ${artist.name}`);

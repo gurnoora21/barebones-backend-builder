@@ -23,7 +23,8 @@ async function refreshSpotifyToken(): Promise<void> {
   });
   
   if (!resp.ok) {
-    throw new Error(`Failed to refresh Spotify token: ${resp.status} ${resp.statusText}`);
+    const errorText = await resp.text();
+    throw new Error(`Failed to refresh Spotify token: ${resp.status} ${resp.statusText}. Details: ${errorText}`);
   }
   
   const data = await resp.json();
@@ -40,18 +41,38 @@ async function ensureToken(): Promise<string> {
   return spotifyAccessToken!;
 }
 
-/** Call Spotify API with the proper token */
-async function spotifyApi(path: string): Promise<any> {
-  const token = await ensureToken();
-  const res = await fetch(`https://api.spotify.com/v1/${path}`, {
-    headers: { 'Authorization': `Bearer ${token}` }
-  });
-  
-  if (!res.ok) {
-    throw new Error(`Spotify API error: ${res.status} ${res.statusText}`);
+/** Call Spotify API with the proper token and retry logic */
+async function spotifyApi(path: string, retries = 3): Promise<any> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const token = await ensureToken();
+      const res = await fetch(`https://api.spotify.com/v1/${path}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      
+      if (res.status === 429) {
+        // Rate limited - get retry-after header and wait
+        const retryAfter = res.headers.get('Retry-After') || '1';
+        const waitTime = parseInt(retryAfter, 10) * 1000;
+        console.log(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`);
+        await wait(waitTime);
+        continue;
+      }
+      
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Spotify API error: ${res.status} ${res.statusText}. Details: ${errorText}`);
+      }
+      
+      return res.json();
+    } catch (err) {
+      if (attempt === retries) throw err;
+      console.warn(`Spotify API error (attempt ${attempt}/${retries}):`, err);
+      await wait(1000 * attempt); // Exponential backoff
+    }
   }
   
-  return res.json();
+  throw new Error('Should not reach here - all retries failed');
 }
 
 // Specific Spotify helper functions
@@ -61,12 +82,12 @@ export async function getSpotifyArtistId(name: string): Promise<string | null> {
 }
 
 export async function getArtistAlbums(artistId: string, offset = 0): Promise<any> {
-  return spotifyApi(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
+  return spotifyApi(`artists/${artistId}/albums?include_groups=album,single,appears_on,compilation&limit=50&offset=${offset}`);
 }
 
-export async function getAlbumTracks(albumId: string): Promise<any[]> {
-  const data = await spotifyApi(`albums/${albumId}/tracks?limit=50`);
-  return data.items || [];
+export async function getAlbumTracks(albumId: string, offset = 0): Promise<any> {
+  const data = await spotifyApi(`albums/${albumId}/tracks?limit=50&offset=${offset}`);
+  return data;
 }
 
 export async function getTrackDetails(trackId: string): Promise<any> {

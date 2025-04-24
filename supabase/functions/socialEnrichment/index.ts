@@ -1,6 +1,6 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { BaseWorker } from "../lib/baseWorker.ts";
+import { PageWorker } from "../lib/pageWorker.ts";
 
 // Define the message type for social enrichment
 interface SocialEnrichmentMsg {
@@ -13,13 +13,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-class SocialEnrichmentWorker extends BaseWorker<SocialEnrichmentMsg> {
+class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
   constructor() {
-    // Use 30s visibility timeout and batch size of 5
-    super('social_enrichment', 30, 5);
+    // Use 30s visibility timeout
+    super('social_enrichment', 30);
   }
 
-  protected async processMessage(msg: SocialEnrichmentMsg, msgId: number): Promise<void> {
+  protected async process(msg: SocialEnrichmentMsg): Promise<void> {
     const { producerName } = msg;
     console.log(`Processing social enrichment for producer ${producerName}`);
     
@@ -36,9 +36,12 @@ class SocialEnrichmentWorker extends BaseWorker<SocialEnrichmentMsg> {
     // Store the enriched data in the metrics table with the details
     await this.supabase.from('queue_metrics').insert({
       queue_name: this.queueName,
-      msg_id: msgId,
+      msg_id: -1, // We don't have a msg_id in this context
       status: 'success',
-      details: profile
+      details: {
+        producerName,
+        profiles: profile
+      }
     });
     
     console.log(`Completed social enrichment for ${producerName}`);

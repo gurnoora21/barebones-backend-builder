@@ -1,6 +1,6 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { BaseWorker } from "../lib/baseWorker.ts";
+import { PageWorker } from "../lib/pageWorker.ts";
 import { getArtistAlbums, wait } from "../lib/spotifyClient.ts";
 
 // Define the message type for album discovery
@@ -15,13 +15,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-class AlbumDiscoveryWorker extends BaseWorker<AlbumDiscoveryMsg> {
+class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
   constructor() {
-    // Use 120s visibility timeout due to potential API latency and batch size of 5
-    super('album_discovery', 120, 5);
+    // Use 120s visibility timeout due to potential API latency
+    super('album_discovery', 120);
   }
 
-  protected async processMessage(msg: AlbumDiscoveryMsg, msgId: number): Promise<void> {
+  protected async process(msg: AlbumDiscoveryMsg): Promise<void> {
     const { artistId, offset } = msg;
     console.log(`Processing album discovery for artist ${artistId} with offset ${offset}`);
     
@@ -34,13 +34,10 @@ class AlbumDiscoveryWorker extends BaseWorker<AlbumDiscoveryMsg> {
       const album = albums.items[i];
       
       // Enqueue track discovery for this album
-      await this.supabase.rpc('pgmq_send', {
-        queue_name: 'track_discovery',
-        msg: {
-          albumId: album.id,
-          albumName: album.name,
-          artistId
-        }
+      await this.enqueue('track_discovery', {
+        albumId: album.id,
+        albumName: album.name,
+        artistId
       });
       
       console.log(`Enqueued track discovery for album: ${album.name} (${album.id})`);
@@ -55,10 +52,7 @@ class AlbumDiscoveryWorker extends BaseWorker<AlbumDiscoveryMsg> {
     if (offset + albums.items.length < albums.total) {
       const newOffset = offset + albums.items.length;
       
-      await this.supabase.rpc('pgmq_send', {
-        queue_name: 'album_discovery',
-        msg: { artistId, offset: newOffset }
-      });
+      await this.enqueue('album_discovery', { artistId, offset: newOffset });
       
       console.log(`Enqueued next page of albums for artist ${artistId} with offset ${newOffset}`);
     } else {

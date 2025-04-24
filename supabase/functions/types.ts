@@ -61,6 +61,13 @@ export interface Database {
         };
         Returns: number;
       };
+      pgmq_archive: {
+        Args: {
+          queue_name: string;
+          msg_id: number;
+        };
+        Returns: boolean;
+      };
     };
   };
 }
