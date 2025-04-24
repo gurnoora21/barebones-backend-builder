@@ -1,5 +1,5 @@
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 
 export abstract class BaseWorker<Msg> {
@@ -56,7 +56,7 @@ export abstract class BaseWorker<Msg> {
         // Archive message on success to remove it
         await this.supabase.rpc('pgmq_send', {
           queue_name: this.queueName,
-          msg_id: msgId
+          msg: msgId
         });
         
         // Log success metric
