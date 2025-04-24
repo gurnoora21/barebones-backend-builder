@@ -4,6 +4,7 @@ import { PageWorker } from "../lib/pageWorker.ts";
 
 interface SocialEnrichmentMsg {
   producerName: string;
+  traceContext?: any; // Will be automatically handled by the PageWorker base class
 }
 
 const corsHeaders = {
@@ -18,62 +19,74 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
 
   protected async process(msg: SocialEnrichmentMsg): Promise<void> {
     const { producerName } = msg;
-    console.log(`Processing social enrichment for producer ${producerName}`);
     
-    // Get producer from database
-    const { data: producer } = await this.supabase
-      .from('producers')
-      .select('id, metadata')
-      .eq('normalized_name', producerName.toLowerCase().trim())
-      .single();
+    return this.traceOperation('enrichProducer', async () => {
+      console.log(`Processing social enrichment for producer ${producerName}`);
+      
+      // Get producer from database
+      const { data: producer } = await this.supabase
+        .from('producers')
+        .select('id, metadata')
+        .eq('normalized_name', producerName.toLowerCase().trim())
+        .single();
 
-    if (!producer) {
-      throw new Error(`Producer ${producerName} not found in database`);
-    }
+      if (!producer) {
+        throw new Error(`Producer ${producerName} not found in database`);
+      }
 
-    // Extract roles from metadata for specialized social profile searches
-    const roles = producer.metadata?.roles || ['producer'];
-    const isPrimaryProducer = roles.includes('producer');
-    const isWriter = roles.includes('writer');
-    
-    console.log(`Enriching social profile for ${producerName} (roles: ${roles.join(', ')})`);
-    
-    // Build social profile search strategy based on role
-    const socialProfiles: Record<string, string> = {};
-    
-    // Basic social profiles for all
-    socialProfiles.twitter = `https://twitter.com/${encodeURIComponent(producerName)}`;
-    socialProfiles.instagram = `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`;
-    
-    // Add specialized profiles based on role
-    if (isPrimaryProducer) {
-      socialProfiles.soundcloud = `https://soundcloud.com/${encodeURIComponent(producerName.replace(/\s+/g, '-').toLowerCase())}`;
-      socialProfiles.beatstars = `https://beatstars.com/${encodeURIComponent(producerName.replace(/\s+/g, '').toLowerCase())}`;
-    }
-    
-    if (isWriter) {
-      socialProfiles.genius = `https://genius.com/artists/${encodeURIComponent(producerName.replace(/\s+/g, '-'))}`;
-      socialProfiles.ascap = `https://www.ascap.com/repertory#ace/search/writer/${encodeURIComponent(producerName)}`;
-    }
-
-    // Update producer metadata with social profiles
-    const { error: updateError } = await this.supabase
-      .from('producers')
-      .update({
-        metadata: {
-          ...producer.metadata,
-          social_profiles: socialProfiles,
-          last_enriched: new Date().toISOString()
+      // Extract roles from metadata for specialized social profile searches
+      const roles = await this.traceOperation('extractRoles', async () => {
+        return producer.metadata?.roles || ['producer'];
+      });
+      
+      const isPrimaryProducer = roles.includes('producer');
+      const isWriter = roles.includes('writer');
+      
+      console.log(`Enriching social profile for ${producerName} (roles: ${roles.join(', ')})`);
+      
+      // Build social profile search strategy based on role
+      const socialProfiles = await this.traceOperation('buildSocialProfiles', async () => {
+        const profiles: Record<string, string> = {};
+        
+        // Basic social profiles for all
+        profiles.twitter = `https://twitter.com/${encodeURIComponent(producerName)}`;
+        profiles.instagram = `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`;
+        
+        // Add specialized profiles based on role
+        if (isPrimaryProducer) {
+          profiles.soundcloud = `https://soundcloud.com/${encodeURIComponent(producerName.replace(/\s+/g, '-').toLowerCase())}`;
+          profiles.beatstars = `https://beatstars.com/${encodeURIComponent(producerName.replace(/\s+/g, '').toLowerCase())}`;
         }
-      })
-      .eq('id', producer.id);
+        
+        if (isWriter) {
+          profiles.genius = `https://genius.com/artists/${encodeURIComponent(producerName.replace(/\s+/g, '-'))}`;
+          profiles.ascap = `https://www.ascap.com/repertory#ace/search/writer/${encodeURIComponent(producerName)}`;
+        }
+        
+        return profiles;
+      });
 
-    if (updateError) {
-      console.error('Error updating producer metadata:', updateError);
-      throw updateError;
-    }
-    
-    console.log(`Completed social enrichment for ${producerName}`);
+      // Update producer metadata with social profiles
+      await this.traceOperation('updateProducer', async () => {
+        const { error: updateError } = await this.supabase
+          .from('producers')
+          .update({
+            metadata: {
+              ...producer.metadata,
+              social_profiles: socialProfiles,
+              last_enriched: new Date().toISOString()
+            }
+          })
+          .eq('id', producer.id);
+
+        if (updateError) {
+          console.error('Error updating producer metadata:', updateError);
+          throw updateError;
+        }
+      });
+      
+      console.log(`Completed social enrichment for ${producerName}`);
+    });
   }
 }
 

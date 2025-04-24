@@ -22,11 +22,24 @@ export interface ErrorDetails {
   originalError?: Error;
 }
 
+// Trace context for distributed tracing
+export interface TraceContext {
+  traceId: string;
+  spanId: string;
+  parentId?: string;
+  serviceName: string;
+  operationName: string;
+  timestamp: number;
+  attributes: Record<string, string | number | boolean>;
+}
+
 export abstract class PageWorker<Msg> {
   protected supabase: SupabaseClient<Database>;
   protected queueName: string;
   protected vtSeconds: number;
   protected startTime: number;
+  protected traceContext?: TraceContext;
+  private _workerId: string | undefined;
 
   constructor(queueName: string, vtSeconds = 60) {
     this.queueName = queueName;
@@ -41,7 +54,7 @@ export abstract class PageWorker<Msg> {
   }
 
   // Read exactly one message from the queue
-  async readOne(): Promise<{ msgId: number; msg: Msg; readCt: number } | null> {
+  async readOne(): Promise<{ msgId: number; msg: Msg; readCt: number; traceContext?: TraceContext } | null> {
     console.log(`Reading one message from queue: ${this.queueName}`);
     
     try {
@@ -75,10 +88,17 @@ export abstract class PageWorker<Msg> {
         return null;
       }
       
+      // Extract trace context if present in the message
+      let extractedTraceContext: TraceContext | undefined;
+      if (typeof msg === 'object' && msg !== null && 'traceContext' in msg) {
+        extractedTraceContext = (msg as any).traceContext;
+      }
+      
       return {
         msgId: row.msg_id,
         msg: msg,
-        readCt: row.read_ct
+        readCt: row.read_ct,
+        traceContext: extractedTraceContext
       };
     } catch (err) {
       const categorizedError = this.categorizeError(err);
@@ -129,7 +149,8 @@ export abstract class PageWorker<Msg> {
         status: 'success',
         details: { 
           processing_time_ms: processingTime,
-          worker_instance: this.getWorkerId()
+          worker_instance: this.getWorkerId(),
+          trace_id: this.traceContext?.traceId
         }
       });
       
@@ -141,12 +162,23 @@ export abstract class PageWorker<Msg> {
     }
   }
 
-  // Enqueue a new message to any queue
+  // Enqueue a new message to any queue with trace context propagation
   async enqueue(queueName: string, msg: any): Promise<number> {
     try {
+      // Propagate trace context if available
+      const messageWithTracing = this.traceContext ? {
+        ...msg,
+        traceContext: {
+          ...this.traceContext,
+          parentId: this.traceContext.spanId,
+          spanId: this.generateSpanId(),
+          timestamp: Date.now()
+        }
+      } : msg;
+      
       const { data, error } = await this.supabase.rpc('pgmq_send', {
         queue_name: queueName,
-        msg: msg
+        msg: messageWithTracing
       });
       
       if (error) {
@@ -176,7 +208,8 @@ export abstract class PageWorker<Msg> {
           error: error.message,
           category: error.category,
           time: new Date().toISOString(),
-          worker_instance: this.getWorkerId()
+          worker_instance: this.getWorkerId(),
+          trace_id: this.traceContext?.traceId
         }
       });
       
@@ -204,12 +237,94 @@ export abstract class PageWorker<Msg> {
           category: error.category,
           retryable: error.retryable,
           time: new Date().toISOString(),
-          worker_instance: this.getWorkerId()
+          worker_instance: this.getWorkerId(),
+          trace_id: this.traceContext?.traceId
         }
       });
     } catch (err) {
       console.error(`Failed to log error for message ${msgId}:`, err);
       // Non-critical, continue
+    }
+  }
+
+  // Execute an operation with tracing
+  protected async traceOperation<T>(
+    operationName: string, 
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const startTime = Date.now();
+    
+    // Create a new span for this operation
+    const spanId = this.generateSpanId();
+    const operationContext: TraceContext = {
+      traceId: this.traceContext?.traceId || this.generateTraceId(),
+      spanId: spanId,
+      parentId: this.traceContext?.spanId,
+      serviceName: this.queueName,
+      operationName: operationName,
+      timestamp: startTime,
+      attributes: {
+        workerId: this.getWorkerId()
+      }
+    };
+    
+    // Save the previous context so we can restore it
+    const previousContext = this.traceContext;
+    this.traceContext = operationContext;
+    
+    // Log start of operation
+    console.log(`[Trace:${operationContext.traceId}:${operationContext.spanId}] Starting operation: ${operationName}`);
+    
+    try {
+      // Execute the operation
+      const result = await fn();
+      
+      // Log successful completion
+      const duration = Date.now() - startTime;
+      console.log(`[Trace:${operationContext.traceId}:${operationContext.spanId}] Completed operation: ${operationName} in ${duration}ms`);
+      
+      // Store trace in database for analysis (optional, can be removed if too noisy)
+      await this.recordTrace(operationContext, {
+        status: "success",
+        duration_ms: duration
+      });
+      
+      return result;
+    } catch (error) {
+      // Log error
+      const duration = Date.now() - startTime;
+      console.error(`[Trace:${operationContext.traceId}:${operationContext.spanId}] Failed operation: ${operationName} after ${duration}ms:`, error);
+      
+      // Store trace with error
+      await this.recordTrace(operationContext, {
+        status: "error",
+        duration_ms: duration,
+        error: error.message || String(error)
+      });
+      
+      throw error;
+    } finally {
+      // Restore previous context
+      this.traceContext = previousContext;
+    }
+  }
+
+  // Record a trace in the database
+  private async recordTrace(context: TraceContext, details: any): Promise<void> {
+    try {
+      await this.supabase.from('traces').insert({
+        trace_id: context.traceId,
+        span_id: context.spanId,
+        parent_id: context.parentId,
+        service: context.serviceName,
+        operation: context.operationName,
+        timestamp: new Date(context.timestamp).toISOString(),
+        attributes: context.attributes,
+        details: details
+      }).select();
+    } catch (error) {
+      // Don't fail if we can't record the trace
+      console.error("Failed to record trace:", error);
     }
   }
 
@@ -224,22 +339,39 @@ export abstract class PageWorker<Msg> {
       return;
     }
     
-    const { msgId, msg, readCt } = message;
+    const { msgId, msg, readCt, traceContext } = message;
+    
+    // Initialize or propagate trace context
+    this.traceContext = traceContext || {
+      traceId: this.generateTraceId(),
+      spanId: this.generateSpanId(),
+      serviceName: this.queueName,
+      operationName: 'process',
+      timestamp: Date.now(),
+      attributes: {
+        workerId: this.getWorkerId(),
+        msgId: String(msgId),
+        readCt: String(readCt)
+      }
+    };
+    
+    console.log(`[Trace:${this.traceContext.traceId}] Processing message ${msgId} from queue ${this.queueName}`);
     
     try {
-      console.log(`Processing message ${msgId} from queue ${this.queueName}`);
-      
-      // Apply timeout to processing
-      const timeout = 30000; // 30 second timeout
-      const processPromise = this.process(msg);
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
+      await this.traceOperation('process', async () => {
+        // Apply timeout to processing
+        const timeout = 30000; // 30 second timeout
+        const processPromise = this.process(msg);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
+        });
+        
+        await Promise.race([processPromise, timeoutPromise]);
       });
       
-      await Promise.race([processPromise, timeoutPromise]);
       await this.ack(msgId);
     } catch (err) {
-      console.error(`Error processing msg ${msgId} on ${this.queueName}:`, err);
+      console.error(`[Trace:${this.traceContext.traceId}] Error processing msg ${msgId} on ${this.queueName}:`, err);
       
       const error = this.categorizeError(err);
       
@@ -333,11 +465,20 @@ export abstract class PageWorker<Msg> {
   }
   
   // Generate a unique worker ID for tracking in logs
-  private getWorkerId(): string {
+  protected getWorkerId(): string {
     if (!this._workerId) {
       this._workerId = `${this.queueName}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     }
     return this._workerId;
   }
-  private _workerId: string | undefined;
+  
+  // Generate a unique trace ID
+  protected generateTraceId(): string {
+    return crypto.randomUUID();
+  }
+  
+  // Generate a unique span ID
+  protected generateSpanId(): string {
+    return Math.random().toString(36).substring(2, 16);
+  }
 }
