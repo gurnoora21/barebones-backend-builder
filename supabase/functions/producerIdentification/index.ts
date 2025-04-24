@@ -25,8 +25,16 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
     if (!geniusToken) {
       console.warn("GENIUS_ACCESS_TOKEN not set, Genius integration will be skipped");
     } else {
-      this.geniusClient = createGeniusClient(geniusToken, this.supabase);
+      this.geniusClient = createGeniusClient(geniusToken);
     }
+  }
+
+  private normalizeProducerName(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^\w\s]/g, '') // Remove special characters
+      .trim()
+      .replace(/\s+/g, ' '); // Normalize whitespace
   }
 
   protected async process(msg: ProducerIdentificationMsg): Promise<void> {
@@ -47,7 +55,7 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
       throw new Error(`Track ${trackId} not found in database`);
     }
 
-    // Step 1: Process Spotify collaborators
+    // Process Spotify collaborators
     const spotifyProducers = [];
     
     for (const artist of track.artists) {
@@ -61,10 +69,10 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
       }
     }
     
-    // Step 2: Get primary artist for Genius search
+    // Get primary artist for Genius search
     const primaryArtist = track.artists.find(a => a.id === artistId)?.name || '';
 
-    // Step 3: Fetch additional producer/writer information from Genius
+    // Fetch additional producer/writer information from Genius
     let geniusProducers = [];
     
     if (this.geniusClient) {
@@ -109,13 +117,13 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
       }
     }
 
-    // Step 4: Merge and deduplicate producer lists
+    // Merge and deduplicate producer lists
     const allProducers = [...spotifyProducers, ...geniusProducers];
     const uniqueProducersByName = new Map();
 
     // Deduplicate by name, preferring higher confidence sources
     for (const producer of allProducers) {
-      const normalizedName = producer.name.toLowerCase().trim();
+      const normalizedName = this.normalizeProducerName(producer.name);
       
       if (!uniqueProducersByName.has(normalizedName) || 
           producer.confidence > uniqueProducersByName.get(normalizedName).confidence) {
@@ -123,7 +131,7 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
       }
     }
     
-    // Step 5: Save each unique producer to the database
+    // Save each unique producer to the database
     for (const [normalizedName, producer] of uniqueProducersByName.entries()) {
       // Create or get producer
       const { data: existingProducer } = await this.supabase
@@ -147,8 +155,8 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
           if (currentProducer) {
             const updatedMetadata = {
               ...currentProducer.metadata,
-              roles: [...(currentProducer.metadata?.roles || []), producer.role],
-              sources: [...(currentProducer.metadata?.sources || []), producer.source]
+              roles: [...new Set([...(currentProducer.metadata?.roles || []), producer.role])],
+              sources: [...new Set([...(currentProducer.metadata?.sources || []), producer.source])]
             };
             
             await this.supabase
@@ -167,7 +175,8 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
             metadata: { 
               source: producer.source,
               roles: [producer.role],
-              external_ids: producer.external_id ? [producer.external_id] : []
+              external_ids: producer.external_id ? [producer.external_id] : [],
+              discovery_timestamp: new Date().toISOString()
             }
           })
           .select('id')

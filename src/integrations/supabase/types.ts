@@ -9,6 +9,116 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      albums: {
+        Row: {
+          artist_id: string
+          created_at: string | null
+          id: string
+          metadata: Json | null
+          name: string
+          release_date: string | null
+          spotify_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          artist_id: string
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name: string
+          release_date?: string | null
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          artist_id?: string
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name?: string
+          release_date?: string | null
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "albums_artist_id_fkey"
+            columns: ["artist_id"]
+            isOneToOne: false
+            referencedRelation: "artists"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      artists: {
+        Row: {
+          created_at: string | null
+          id: string
+          metadata: Json | null
+          name: string
+          spotify_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name: string
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name?: string
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      normalized_tracks: {
+        Row: {
+          artist_id: string
+          created_at: string | null
+          id: string
+          normalized_name: string
+          representative_track_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          artist_id: string
+          created_at?: string | null
+          id?: string
+          normalized_name: string
+          representative_track_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          artist_id?: string
+          created_at?: string | null
+          id?: string
+          normalized_name?: string
+          representative_track_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "normalized_tracks_artist_id_fkey"
+            columns: ["artist_id"]
+            isOneToOne: false
+            referencedRelation: "artists"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "normalized_tracks_representative_track_id_fkey"
+            columns: ["representative_track_id"]
+            isOneToOne: false
+            referencedRelation: "tracks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       pgmq_dead_letter_items: {
         Row: {
           details: Json | null
@@ -33,6 +143,33 @@ export type Database = {
           id?: number
           msg?: Json
           queue_name?: string
+        }
+        Relationships: []
+      }
+      producers: {
+        Row: {
+          created_at: string | null
+          id: string
+          metadata: Json | null
+          name: string
+          normalized_name: string
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name: string
+          normalized_name: string
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          name?: string
+          normalized_name?: string
+          updated_at?: string | null
         }
         Relationships: []
       }
@@ -101,6 +238,89 @@ export type Database = {
           trace_id?: string
         }
         Relationships: []
+      }
+      track_producers: {
+        Row: {
+          confidence: number
+          created_at: string | null
+          id: string
+          producer_id: string
+          source: string
+          track_id: string
+        }
+        Insert: {
+          confidence: number
+          created_at?: string | null
+          id?: string
+          producer_id: string
+          source: string
+          track_id: string
+        }
+        Update: {
+          confidence?: number
+          created_at?: string | null
+          id?: string
+          producer_id?: string
+          source?: string
+          track_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "track_producers_producer_id_fkey"
+            columns: ["producer_id"]
+            isOneToOne: false
+            referencedRelation: "producers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "track_producers_track_id_fkey"
+            columns: ["track_id"]
+            isOneToOne: false
+            referencedRelation: "tracks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tracks: {
+        Row: {
+          album_id: string
+          created_at: string | null
+          duration_ms: number | null
+          id: string
+          metadata: Json | null
+          name: string
+          spotify_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          album_id: string
+          created_at?: string | null
+          duration_ms?: number | null
+          id?: string
+          metadata?: Json | null
+          name: string
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          album_id?: string
+          created_at?: string | null
+          duration_ms?: number | null
+          id?: string
+          metadata?: Json | null
+          name?: string
+          spotify_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tracks_album_id_fkey"
+            columns: ["album_id"]
+            isOneToOne: false
+            referencedRelation: "albums"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {

@@ -38,7 +38,7 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       throw new Error('No artistId or artistName provided');
     }
 
-    // Insert or update artist in our database
+    // Check if artist already exists
     const { data: existingArtist } = await this.supabase
       .from('artists')
       .select('id')
@@ -46,21 +46,27 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       .single();
 
     if (!existingArtist) {
+      // Insert new artist
       const { error: insertError } = await this.supabase
         .from('artists')
         .insert({
           spotify_id: artistId,
           name: msg.artistName || artistId,
-          metadata: { source: 'spotify' }
+          metadata: { 
+            source: 'spotify',
+            discovery_timestamp: new Date().toISOString()
+          }
         });
 
       if (insertError) {
         console.error('Error inserting artist:', insertError);
         throw insertError;
       }
+      
+      console.log(`Created new artist record for: ${msg.artistName || artistId}`);
     }
 
-    // Enqueue album discovery with offset 0
+    // Queue album discovery with offset 0
     await this.enqueue('album_discovery', { 
       artistId,
       offset: 0

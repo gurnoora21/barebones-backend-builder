@@ -57,7 +57,8 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             metadata: {
               source: 'spotify',
               type: album.album_type,
-              total_tracks: album.total_tracks
+              total_tracks: album.total_tracks,
+              discovery_timestamp: new Date().toISOString()
             }
           });
 
@@ -65,8 +66,11 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           console.error('Error inserting album:', insertError);
           throw insertError;
         }
+        
+        console.log(`Created new album record: ${album.name}`);
       }
       
+      // Queue track discovery for this album
       await this.enqueue('track_discovery', {
         albumId: album.id,
         albumName: album.name,
@@ -75,11 +79,13 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       
       console.log(`Enqueued track discovery for album: ${album.name} (${album.id})`);
       
+      // Add a small delay every few albums to avoid rate limiting
       if (i > 0 && i % 5 === 0) {
         await wait(200);
       }
     }
     
+    // If there are more albums, queue the next page
     if (offset + albums.items.length < albums.total) {
       const newOffset = offset + albums.items.length;
       

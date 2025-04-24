@@ -20,6 +20,17 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     super('track_discovery', 60);
   }
 
+  private normalizeTrackName(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\(.*?\)/g, '') // Remove parentheses and their contents
+      .replace(/\[.*?\]/g, '') // Remove square brackets and their contents
+      .replace(/feat\.|ft\./g, '') // Remove feat. or ft.
+      .replace(/[^\w\s]/g, '') // Remove special characters
+      .trim()
+      .replace(/\s+/g, ' '); // Normalize whitespace
+  }
+
   protected async process(msg: TrackDiscoveryMsg): Promise<void> {
     const { albumId, albumName, artistId, offset = 0 } = msg;
     console.log(`Processing track discovery for album ${albumName} (${albumId}) with offset ${offset}`);
@@ -40,6 +51,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     
     for (let i = 0; i < tracks.items.length; i++) {
       const track = tracks.items[i];
+      const normalizedName = this.normalizeTrackName(track.name);
       
       // Insert or update track in our database
       const { data: existingTrack } = await this.supabase
@@ -48,8 +60,9 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         .eq('spotify_id', track.id)
         .single();
 
+      let trackId: string;
       if (!existingTrack) {
-        const { error: insertError } = await this.supabase
+        const { data: newTrack, error: insertError } = await this.supabase
           .from('tracks')
           .insert({
             spotify_id: track.id,
@@ -59,16 +72,50 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
             metadata: {
               source: 'spotify',
               disc_number: track.disc_number,
-              track_number: track.track_number
+              track_number: track.track_number,
+              discovery_timestamp: new Date().toISOString()
             }
-          });
+          })
+          .select('id')
+          .single();
 
         if (insertError) {
           console.error('Error inserting track:', insertError);
           throw insertError;
         }
+        
+        trackId = newTrack.id;
+        console.log(`Created new track record: ${track.name}`);
+      } else {
+        trackId = existingTrack.id;
       }
       
+      // Handle normalized track entry
+      const { data: existingNormalized } = await this.supabase
+        .from('normalized_tracks')
+        .select('id, representative_track_id')
+        .eq('normalized_name', normalizedName)
+        .eq('artist_id', artistId)
+        .single();
+
+      if (!existingNormalized) {
+        const { error: normalizedError } = await this.supabase
+          .from('normalized_tracks')
+          .insert({
+            normalized_name: normalizedName,
+            artist_id: artistId,
+            representative_track_id: trackId
+          });
+
+        if (normalizedError) {
+          console.error('Error inserting normalized track:', normalizedError);
+          throw normalizedError;
+        }
+        
+        console.log(`Created new normalized track entry: ${normalizedName}`);
+      }
+      
+      // Queue producer identification
       await this.enqueue('producer_identification', {
         trackId: track.id,
         trackName: track.name,
