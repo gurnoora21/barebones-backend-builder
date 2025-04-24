@@ -1,7 +1,7 @@
 
 # Backend-Only Music Producer Discovery Pipeline
 
-A robust, backend-only pipeline that crawls Spotify data, identifies music producers, and enriches them with social media information. Built on Supabase with PGMQ queue system.
+A robust, backend-only pipeline that crawls Spotify and Genius data, identifies music producers and writers, and enriches them with social media information. Built on Supabase with PGMQ queue system.
 
 ## Architecture
 
@@ -35,11 +35,14 @@ All implemented as Supabase Edge Functions:
 - `artistDiscovery`: Entry point, resolves artist IDs and kickstarts pipeline
 - `albumDiscovery`: Gets artist's albums in pages of 50
 - `trackDiscovery`: Gets album tracks in pages of 50
-- `producerIdentification`: Identifies producers/collaborators for tracks
+- `producerIdentification`: Identifies producers/collaborators for tracks from both Spotify and Genius
 - `socialEnrichment`: Enriches producer info with social profiles
 
-### Utilities
+### API Clients
 - `spotifyClient.ts`: Enhanced Spotify API client with rate limiting, caching, etc.
+- `geniusClient.ts`: Genius API client for fetching detailed producer/writer credits
+
+### Utilities
 - `maintenance`: Scheduled cleanup and recovery tasks
 
 ## Required Environment Variables
@@ -49,6 +52,7 @@ SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 SPOTIFY_CLIENT_ID=your-spotify-client-id
 SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
+GENIUS_ACCESS_TOKEN=your-genius-access-token
 ```
 
 ## Setup Instructions
@@ -119,37 +123,43 @@ curl -X POST https://your-project-ref.supabase.co/functions/v1/artistDiscovery \
 
 The system includes these production-grade features:
 
-1. **Rate Limiting & Backpressure Control**:
+1. **Multi-Source Producer Identification**:
+   - Spotify API for collaborator information
+   - Genius API for detailed producer and writer credits
+   - Confidence scoring based on data source reliability
+   - Deduplication of producers across multiple sources
+
+2. **Rate Limiting & Backpressure Control**:
    - Fixed-window rate limiting with DB storage
    - Concurrency limits to prevent overloading
    - Dynamic backoff based on response headers
 
-2. **Circuit Breaker Pattern**:
+3. **Circuit Breaker Pattern**:
    - Prevents hammering failing services
    - Auto-resets after cooldown period
    - State tracking (CLOSED, OPEN, HALF-OPEN)
 
-3. **Enhanced Error Handling**:
+4. **Enhanced Error Handling**:
    - Error categorization by type
    - Retryable vs. non-retryable distinction
    - Timeout controls for all operations
 
-4. **Caching Layer**:
+5. **Caching Layer**:
    - In-memory TTL cache for API responses
    - Per-endpoint TTL configuration
    - Automatic cache invalidation
 
-5. **Maintenance Tasks**:
+6. **Maintenance Tasks**:
    - Scheduled cleanup of expired records
    - Detection and handling of stalled messages
    - Health checks and monitoring
 
-6. **Observability**:
+7. **Observability**:
    - Detailed structured logging
    - Performance metrics collection
    - Error aggregation and analysis
 
-7. **Schema Validation**:
+8. **Schema Validation**:
    - Message schema validation
    - Strong typing with TypeScript
    - Dead-letter handling of invalid messages

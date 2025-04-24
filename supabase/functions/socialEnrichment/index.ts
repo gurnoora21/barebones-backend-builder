@@ -31,13 +31,30 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       throw new Error(`Producer ${producerName} not found in database`);
     }
 
-    // TODO: implement actual lookup (e.g., call a people search API or web scrape)
-    console.log(`Enriching social profile for ${producerName}`);
+    // Extract roles from metadata for specialized social profile searches
+    const roles = producer.metadata?.roles || ['producer'];
+    const isPrimaryProducer = roles.includes('producer');
+    const isWriter = roles.includes('writer');
     
-    const socialProfiles = { 
-      twitter: `https://twitter.com/${encodeURIComponent(producerName)}`,
-      instagram: `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`,
-    };
+    console.log(`Enriching social profile for ${producerName} (roles: ${roles.join(', ')})`);
+    
+    // Build social profile search strategy based on role
+    const socialProfiles: Record<string, string> = {};
+    
+    // Basic social profiles for all
+    socialProfiles.twitter = `https://twitter.com/${encodeURIComponent(producerName)}`;
+    socialProfiles.instagram = `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`;
+    
+    // Add specialized profiles based on role
+    if (isPrimaryProducer) {
+      socialProfiles.soundcloud = `https://soundcloud.com/${encodeURIComponent(producerName.replace(/\s+/g, '-').toLowerCase())}`;
+      socialProfiles.beatstars = `https://beatstars.com/${encodeURIComponent(producerName.replace(/\s+/g, '').toLowerCase())}`;
+    }
+    
+    if (isWriter) {
+      socialProfiles.genius = `https://genius.com/artists/${encodeURIComponent(producerName.replace(/\s+/g, '-'))}`;
+      socialProfiles.ascap = `https://www.ascap.com/repertory#ace/search/writer/${encodeURIComponent(producerName)}`;
+    }
 
     // Update producer metadata with social profiles
     const { error: updateError } = await this.supabase
