@@ -1,4 +1,3 @@
-
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 import { globalCache } from './cache.ts';
@@ -283,7 +282,7 @@ export abstract class PageWorker<Msg> {
       const duration = Date.now() - startTime;
       console.log(`[Trace:${operationContext.traceId}:${operationContext.spanId}] Completed operation: ${operationName} in ${duration}ms`);
       
-      // Store trace in database for analysis (optional, can be removed if too noisy)
+      // Store trace in database for analysis
       await this.recordTrace(operationContext, {
         status: "success",
         duration_ms: duration
@@ -321,7 +320,7 @@ export abstract class PageWorker<Msg> {
         timestamp: new Date(context.timestamp).toISOString(),
         attributes: context.attributes,
         details: details
-      }).select();
+      });
     } catch (error) {
       // Don't fail if we can't record the trace
       console.error("Failed to record trace:", error);

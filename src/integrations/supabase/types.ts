@@ -63,6 +63,45 @@ export type Database = {
         }
         Relationships: []
       }
+      traces: {
+        Row: {
+          attributes: Json | null
+          created_at: string
+          details: Json | null
+          id: string
+          operation: string
+          parent_id: string | null
+          service: string
+          span_id: string
+          timestamp: string
+          trace_id: string
+        }
+        Insert: {
+          attributes?: Json | null
+          created_at?: string
+          details?: Json | null
+          id?: string
+          operation: string
+          parent_id?: string | null
+          service: string
+          span_id: string
+          timestamp: string
+          trace_id: string
+        }
+        Update: {
+          attributes?: Json | null
+          created_at?: string
+          details?: Json | null
+          id?: string
+          operation?: string
+          parent_id?: string | null
+          service?: string
+          span_id?: string
+          timestamp?: string
+          trace_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       dead_letter_details: {
@@ -95,6 +134,18 @@ export type Database = {
           hour: string | null
           messages_processed: number | null
           queue_name: string | null
+        }
+        Relationships: []
+      }
+      trace_summary: {
+        Row: {
+          duration: unknown | null
+          end_time: string | null
+          operations: string[] | null
+          services: string[] | null
+          span_count: number | null
+          start_time: string | null
+          trace_id: string | null
         }
         Relationships: []
       }
