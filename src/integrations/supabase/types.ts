@@ -9,13 +9,111 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
-      [_ in never]: never
+      pgmq_dead_letter_items: {
+        Row: {
+          details: Json | null
+          fail_count: number
+          failed_at: string
+          id: number
+          msg: Json
+          queue_name: string
+        }
+        Insert: {
+          details?: Json | null
+          fail_count: number
+          failed_at?: string
+          id?: number
+          msg: Json
+          queue_name: string
+        }
+        Update: {
+          details?: Json | null
+          fail_count?: number
+          failed_at?: string
+          id?: number
+          msg?: Json
+          queue_name?: string
+        }
+        Relationships: []
+      }
+      queue_metrics: {
+        Row: {
+          details: Json | null
+          id: string
+          msg_id: number
+          processed_at: string
+          queue_name: string
+          status: string
+        }
+        Insert: {
+          details?: Json | null
+          id?: string
+          msg_id: number
+          processed_at?: string
+          queue_name: string
+          status: string
+        }
+        Update: {
+          details?: Json | null
+          id?: string
+          msg_id?: number
+          processed_at?: string
+          queue_name?: string
+          status?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
-      [_ in never]: never
+      dead_letter_details: {
+        Row: {
+          details: Json | null
+          fail_count: number | null
+          failed_at: string | null
+          msg: Json | null
+          queue_name: string | null
+        }
+        Insert: {
+          details?: Json | null
+          fail_count?: number | null
+          failed_at?: string | null
+          msg?: Json | null
+          queue_name?: string | null
+        }
+        Update: {
+          details?: Json | null
+          fail_count?: number | null
+          failed_at?: string | null
+          msg?: Json | null
+          queue_name?: string | null
+        }
+        Relationships: []
+      }
+      queue_stats: {
+        Row: {
+          error_count: number | null
+          hour: string | null
+          messages_processed: number | null
+          queue_name: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
-      [_ in never]: never
+      pgmq_read: {
+        Args: { queue_name: string; vt: number; qty: number }
+        Returns: {
+          msg_id: number
+          read_ct: number
+          enqueued_at: string
+          vt: string
+          message: Json
+        }[]
+      }
+      pgmq_send: {
+        Args: { queue_name: string; msg: Json }
+        Returns: number
+      }
     }
     Enums: {
       [_ in never]: never
