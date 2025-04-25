@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getArtistAlbums, wait } from "../lib/spotifyClient.ts";
@@ -127,6 +128,22 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       throw error;
     }
   }
+
+  // New method to reset the album discovery queue
+  async resetQueue(): Promise<void> {
+    try {
+      console.log("Resetting album_discovery queue...");
+      
+      // Execute the queue reset SQL directly using supabase
+      await this.supabase.rpc("pgmq_drop_and_recreate_queue", { queue_name: "album_discovery" });
+      
+      console.log("Successfully reset album_discovery queue");
+      return;
+    } catch (error) {
+      console.error("Error resetting album_discovery queue:", error);
+      throw error;
+    }
+  }
 }
 
 const worker = new AlbumDiscoveryWorker();
@@ -138,6 +155,18 @@ serve(async (req: Request) => {
 
   try {
     console.log('Album Discovery worker received request');
+    
+    // Handle reset command if specified in request
+    if (req.method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      
+      if (body?.action === 'reset') {
+        await worker.resetQueue();
+        return new Response(JSON.stringify({ success: true, message: 'Queue reset successfully' }), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+    }
     
     await worker.run();
     
