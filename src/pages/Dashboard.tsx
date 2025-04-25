@@ -1,18 +1,19 @@
 
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
-import { useToast } from "@/hooks/use-toast";
-import { Separator } from "@/components/ui/separator";
-import { AlertCircle, CheckCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { 
+  Card, 
+  CardContent, 
+  CardDescription, 
+  CardHeader, 
+  CardTitle 
+} from "../components/ui/card";
+import { Button } from "../components/ui/button";
+import { toast } from "sonner";
+import { supabase } from "../integrations/supabase/client";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { AlertCircle, RefreshCw } from "lucide-react";
 
-interface QueueMetrics {
+interface QueueStat {
   queue_name: string;
   hour: string;
   messages_processed: number;
@@ -24,291 +25,212 @@ interface QueueMetrics {
 
 interface DeadLetterAnalysis {
   queue_name: string;
-  error_category: string | null;
+  error_category: string;
   error_count: number;
   last_occurrence: string;
   first_occurrence: string;
 }
 
-const ARTIST_NAMES = [
-  "Drake",
-  "Taylor Swift",
-  "The Weeknd",
-  "Ariana Grande",
-  "Kendrick Lamar",
-  "Beyoncé",
-  "Post Malone",
-  "Billie Eilish",
-  "Ed Sheeran",
-  "Bruno Mars"
-];
-
 export default function Dashboard() {
-  const [artistName, setArtistName] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const { toast } = useToast();
+  const [queueStats, setQueueStats] = useState<QueueStat[]>([]);
+  const [deadLetterAnalysis, setDeadLetterAnalysis] = useState<DeadLetterAnalysis[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch queue metrics
-  const { data: queueStats, isLoading: statsLoading, refetch: refetchStats } = useQuery({
-    queryKey: ['queueStats'],
-    queryFn: async () => {
-      const { data, error } = await supabase
+  const fetchData = async () => {
+    setRefreshing(true);
+    setError(null);
+    
+    try {
+      // Fetch queue stats
+      const { data: statsData, error: statsError } = await supabase
         .from('queue_stats')
         .select('*')
         .order('hour', { ascending: false });
+        
+      if (statsError) {
+        throw new Error(`Error fetching queue stats: ${statsError.message}`);
+      }
       
-      if (error) throw error;
-      return data as QueueMetrics[];
-    }
-  });
-
-  // Fetch dead letter items
-  const { data: deadLetterAnalysis, isLoading: deadLetterLoading, refetch: refetchDeadLetters } = useQuery({
-    queryKey: ['deadLetterAnalysis'],
-    queryFn: async () => {
-      const { data, error } = await supabase
+      // Fetch dead letter analysis
+      const { data: deadLetterData, error: deadLetterError } = await supabase
         .from('dead_letter_analysis')
         .select('*')
         .order('error_count', { ascending: false });
-      
-      if (error) throw error;
-      return data as DeadLetterAnalysis[];
-    }
-  });
-
-  // Submit an artist for discovery
-  const handleSubmitArtist = async () => {
-    if (!artistName.trim()) {
-      toast({
-        title: "Error",
-        description: "Please enter an artist name",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setIsSubmitting(true);
-    
-    try {
-      const response = await fetch(`https://nsxxzhhbcwzatvlulfyp.functions.supabase.co/artistDiscovery`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zeHh6aGhiY3d6YXR2bHVsZnlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ4NDQ4NDYsImV4cCI6MjA2MDQyMDg0Nn0.CR3TFPYipFCs6sL_51rJ3kOKR3iQGr8tJgZJ2GLlrDk`
-        },
-        body: JSON.stringify({ artistName })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        toast({
-          title: "Success",
-          description: `Artist discovery task for "${artistName}" has been queued!`,
-        });
-        setArtistName("");
         
-        // Refetch data after a short delay to see updates
-        setTimeout(() => {
-          refetchStats();
-          refetchDeadLetters();
-        }, 2000);
-      } else {
-        throw new Error(data.error || "Failed to queue artist discovery");
+      if (deadLetterError) {
+        throw new Error(`Error fetching dead letter analysis: ${deadLetterError.message}`);
       }
-    } catch (error) {
-      console.error("Error submitting artist:", error);
-      toast({
-        title: "Error",
-        description: `Failed to queue artist: ${error instanceof Error ? error.message : String(error)}`,
-        variant: "destructive"
-      });
+      
+      setQueueStats(statsData || []);
+      setDeadLetterAnalysis(deadLetterData || []);
+    } catch (err: any) {
+      console.error("Error fetching data:", err);
+      setError(err.message);
+      toast.error("Failed to load queue data");
     } finally {
-      setIsSubmitting(false);
+      setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  // Submit a predefined artist
-  const handleQuickSubmit = (name: string) => {
-    setArtistName(name);
-    setTimeout(handleSubmitArtist, 100);
+  const triggerArtistDiscovery = async (artistName: string) => {
+    try {
+      const response = await fetch(
+        "https://nsxxzhhbcwzatvlulfyp.functions.supabase.co/artistDiscovery",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${supabase.auth.session()?.access_token}`,
+          },
+          body: JSON.stringify({ artistName }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! Status: ${response.status}`);
+      }
+
+      toast.success(`Started artist discovery for ${artistName}`);
+      // Refresh data after a short delay to allow processing to begin
+      setTimeout(fetchData, 5000);
+    } catch (err: any) {
+      console.error("Error triggering artist discovery:", err);
+      toast.error(`Failed to trigger artist discovery: ${err.message}`);
+    }
   };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  if (loading && !refreshing) {
+    return <div className="flex items-center justify-center h-screen">Loading queue data...</div>;
+  }
 
   return (
-    <div className="container mx-auto py-10 px-4">
-      <h1 className="text-3xl font-bold mb-8">Spotify Producer Discovery Dashboard</h1>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
-        <Card>
-          <CardHeader>
-            <CardTitle>Discover New Artist</CardTitle>
-            <CardDescription>Submit an artist name to start the discovery pipeline</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Enter artist name"
-                value={artistName}
-                onChange={(e) => setArtistName(e.target.value)}
-                className="flex-1"
-              />
-              <Button onClick={handleSubmitArtist} disabled={isSubmitting || !artistName.trim()}>
-                {isSubmitting ? "Submitting..." : "Submit"}
-              </Button>
-            </div>
-          </CardContent>
-          <CardFooter className="flex flex-wrap gap-2">
-            {ARTIST_NAMES.map(name => (
-              <Button 
-                key={name} 
-                variant="outline" 
-                size="sm" 
-                onClick={() => handleQuickSubmit(name)}
-                disabled={isSubmitting}
-              >
-                {name}
-              </Button>
-            ))}
-          </CardFooter>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Worker Status</CardTitle>
-            <CardDescription>Current status of data processing workers</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {statsLoading ? (
-              <p>Loading worker stats...</p>
-            ) : queueStats && queueStats.length > 0 ? (
-              <div className="space-y-4">
-                {['artist_discovery', 'album_discovery', 'track_discovery', 'producer_identification', 'social_enrichment']
-                  .map(queueName => {
-                    const stats = queueStats.find(s => s.queue_name === queueName);
-                    return (
-                      <div key={queueName} className="flex items-center justify-between">
-                        <span className="capitalize">{queueName.replace('_', ' ')}</span>
-                        {stats ? (
-                          <div className="flex items-center space-x-2">
-                            <CheckCircle className="h-4 w-4 text-green-500" />
-                            <span>{stats.messages_processed} processed</span>
-                            <span className="text-green-500">{stats.success_count} success</span>
-                            {stats.error_count > 0 && (
-                              <span className="text-red-500">{stats.error_count} errors</span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-gray-400">No activity</span>
-                        )}
-                      </div>
-                    )
-                  })}
-              </div>
-            ) : (
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>No Worker Activity</AlertTitle>
-                <AlertDescription>
-                  No worker activity detected yet. Try submitting an artist to start the pipeline.
-                </AlertDescription>
-              </Alert>
-            )}
-          </CardContent>
-          <CardFooter>
-            <Button variant="outline" onClick={() => {
-              refetchStats();
-              refetchDeadLetters();
-              toast({ title: "Refreshed", description: "Data has been refreshed" });
-            }}>
-              Refresh Stats
-            </Button>
-          </CardFooter>
-        </Card>
+    <div className="container mx-auto p-4 space-y-6">
+      <div className="flex justify-between items-center">
+        <h1 className="text-3xl font-bold">Queue Monitoring</h1>
+        <Button 
+          onClick={fetchData} 
+          variant="outline" 
+          size="sm"
+          disabled={refreshing}
+        >
+          <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+          Refresh Data
+        </Button>
       </div>
 
-      <Tabs defaultValue="deadLetters" className="w-full">
-        <TabsList>
-          <TabsTrigger value="deadLetters">Error Analysis</TabsTrigger>
-          <TabsTrigger value="queueMetrics">Queue Metrics</TabsTrigger>
-        </TabsList>
-        
-        <TabsContent value="deadLetters" className="space-y-4">
-          <h2 className="text-xl font-semibold">Error Analysis</h2>
-          
-          {deadLetterLoading ? (
-            <p>Loading error data...</p>
-          ) : deadLetterAnalysis && deadLetterAnalysis.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="text-left p-2 border-b">Queue</th>
-                    <th className="text-left p-2 border-b">Error Type</th>
-                    <th className="text-left p-2 border-b">Count</th>
-                    <th className="text-left p-2 border-b">First Occurrence</th>
-                    <th className="text-left p-2 border-b">Last Occurrence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {deadLetterAnalysis.map((item, i) => (
-                    <tr key={i} className={i % 2 === 0 ? "bg-gray-50" : ""}>
-                      <td className="p-2 border-b">{item.queue_name}</td>
-                      <td className="p-2 border-b">
-                        <span className={
-                          item.error_category === 'permission_denied' ? "text-red-600 font-medium" : 
-                          item.error_category === 'rate_limit' ? "text-yellow-600 font-medium" : ""
-                        }>
-                          {item.error_category}
-                        </span>
-                      </td>
-                      <td className="p-2 border-b">{item.error_count}</td>
-                      <td className="p-2 border-b">{new Date(item.first_occurrence).toLocaleString()}</td>
-                      <td className="p-2 border-b">{new Date(item.last_occurrence).toLocaleString()}</td>
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>
+            {error}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Test Artist Discovery</CardTitle>
+            <CardDescription>
+              Trigger an artist discovery task to test your queues
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {["Drake", "Taylor Swift", "The Beatles"].map((artist) => (
+              <Button
+                key={artist}
+                onClick={() => triggerArtistDiscovery(artist)}
+                className="mr-2"
+                variant="outline"
+              >
+                Process {artist}
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Dead Letter Issues</CardTitle>
+            <CardDescription>
+              Error analysis from failed messages
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {deadLetterAnalysis.length === 0 ? (
+              <p className="text-muted-foreground">No dead letter issues found</p>
+            ) : (
+              <div className="space-y-4 max-h-96 overflow-auto">
+                {deadLetterAnalysis.map((item, i) => (
+                  <div key={i} className="border rounded p-3">
+                    <p className="font-medium">{item.queue_name}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {item.error_category}: {item.error_count} errors
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      First: {new Date(item.first_occurrence).toLocaleString()}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Last: {new Date(item.last_occurrence).toLocaleString()}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <CardTitle>Queue Processing Stats</CardTitle>
+            <CardDescription>
+              Performance metrics for queue processing
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {queueStats.length === 0 ? (
+              <p className="text-muted-foreground">No queue processing data found. Try triggering an artist discovery task.</p>
+            ) : (
+              <div className="overflow-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left p-2">Queue</th>
+                      <th className="text-left p-2">Time</th>
+                      <th className="text-right p-2">Total</th>
+                      <th className="text-right p-2">Success</th>
+                      <th className="text-right p-2">Errors</th>
+                      <th className="text-right p-2">Avg Time (ms)</th>
+                      <th className="text-right p-2">Max Time (ms)</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p>No errors reported yet.</p>
-          )}
-        </TabsContent>
-        
-        <TabsContent value="queueMetrics">
-          <h2 className="text-xl font-semibold mb-4">Queue Processing Metrics</h2>
-          
-          {statsLoading ? (
-            <p>Loading metrics...</p>
-          ) : queueStats && queueStats.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="text-left p-2 border-b">Queue</th>
-                    <th className="text-left p-2 border-b">Time Period</th>
-                    <th className="text-left p-2 border-b">Processed</th>
-                    <th className="text-left p-2 border-b">Success</th>
-                    <th className="text-left p-2 border-b">Errors</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {queueStats.map((stat, i) => (
-                    <tr key={i} className={i % 2 === 0 ? "bg-gray-50" : ""}>
-                      <td className="p-2 border-b">{stat.queue_name}</td>
-                      <td className="p-2 border-b">{new Date(stat.hour).toLocaleString()}</td>
-                      <td className="p-2 border-b">{stat.messages_processed}</td>
-                      <td className="p-2 border-b text-green-600">{stat.success_count}</td>
-                      <td className="p-2 border-b text-red-600">{stat.error_count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p>No queue metrics available yet.</p>
-          )}
-        </TabsContent>
-      </Tabs>
+                  </thead>
+                  <tbody>
+                    {queueStats.map((stat, i) => (
+                      <tr key={i} className="border-b hover:bg-muted/50">
+                        <td className="p-2">{stat.queue_name}</td>
+                        <td className="p-2">{new Date(stat.hour).toLocaleString()}</td>
+                        <td className="text-right p-2">{stat.messages_processed}</td>
+                        <td className="text-right p-2">{stat.success_count}</td>
+                        <td className="text-right p-2">{stat.error_count}</td>
+                        <td className="text-right p-2">{stat.avg_processing_ms?.toFixed(2) || '-'}</td>
+                        <td className="text-right p-2">{stat.max_processing_ms?.toFixed(2) || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
