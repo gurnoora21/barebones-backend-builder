@@ -12,17 +12,19 @@ import { useToast } from "@/hooks/use-toast";
 import { Separator } from "@/components/ui/separator";
 import { AlertCircle, CheckCircle } from "lucide-react";
 
-interface QueueMetric {
+interface QueueMetrics {
   queue_name: string;
   hour: string;
   messages_processed: number;
   success_count: number;
   error_count: number;
+  avg_processing_ms: number | null;
+  max_processing_ms: number | null;
 }
 
-interface DeadLetterItem {
+interface DeadLetterAnalysis {
   queue_name: string;
-  error_category: string;
+  error_category: string | null;
   error_count: number;
   last_occurrence: string;
   first_occurrence: string;
@@ -56,7 +58,7 @@ export default function Dashboard() {
         .order('hour', { ascending: false });
       
       if (error) throw error;
-      return data || [];
+      return data as QueueMetrics[];
     }
   });
 
@@ -70,7 +72,7 @@ export default function Dashboard() {
         .order('error_count', { ascending: false });
       
       if (error) throw error;
-      return data || [];
+      return data as DeadLetterAnalysis[];
     }
   });
 
@@ -203,7 +205,7 @@ export default function Dashboard() {
                   })}
               </div>
             ) : (
-              <Alert variant="warning">
+              <Alert>
                 <AlertCircle className="h-4 w-4" />
                 <AlertTitle>No Worker Activity</AlertTitle>
                 <AlertDescription>

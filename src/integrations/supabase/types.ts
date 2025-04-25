@@ -390,6 +390,16 @@ export type Database = {
       }
     }
     Views: {
+      dead_letter_analysis: {
+        Row: {
+          error_category: string | null
+          error_count: number | null
+          first_occurrence: string | null
+          last_occurrence: string | null
+          queue_name: string | null
+        }
+        Relationships: []
+      }
       dead_letter_details: {
         Row: {
           details: Json | null
@@ -416,10 +426,13 @@ export type Database = {
       }
       queue_stats: {
         Row: {
+          avg_processing_ms: number | null
           error_count: number | null
           hour: string | null
+          max_processing_ms: number | null
           messages_processed: number | null
           queue_name: string | null
+          success_count: number | null
         }
         Relationships: []
       }
