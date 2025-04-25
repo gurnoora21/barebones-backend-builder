@@ -1,6 +1,4 @@
-
-// Enhanced circuit breaker pattern implementation with distributed state
-// Prevents calling failing services repeatedly while providing better observability
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 export enum CircuitState {
   CLOSED = 'closed',   // Normal operation - requests go through
@@ -34,35 +32,29 @@ export class CircuitBreaker {
     this.supabase = supabaseClient;
   }
   
-  // Execute an action through the circuit breaker
   async fire<T>(action: () => Promise<T>): Promise<T> {
-    // If we have Supabase client, sync state from storage first
+    const startTime = Date.now();
+    
     if (this.supabase) {
       await this.syncStateFromStorage();
     }
     
-    // If circuit is open, check if we should try half-open
     if (this.state === CircuitState.OPEN) {
       const now = Date.now();
-      // Check if timeout elapsed to try a new request
       if (now - this.lastFailureTime > this.options.resetTimeoutMs) {
         await this.changeState(CircuitState.HALF_OPEN);
         console.log(`Circuit ${this.options.name} entering half-open state`);
       } else {
-        // Still open, fail fast
         throw new Error(`Circuit ${this.options.name} is open; failing fast until ${new Date(this.lastFailureTime + this.options.resetTimeoutMs).toISOString()}`);
       }
     }
     
     try {
-      const startTime = Date.now();
       const result = await action();
       const duration = Date.now() - startTime;
       
-      // Log success metric
       this.logExecution(true, duration);
       
-      // Success - update counters and possibly close the circuit if it was half-open
       if (this.state === CircuitState.HALF_OPEN) {
         this.successCount++;
         if (this.successCount >= (this.options.halfOpenSuccessThreshold || 1)) {
@@ -84,7 +76,6 @@ export class CircuitBreaker {
     this.failureCount++;
     this.lastFailureTime = Date.now();
     
-    // Trip the circuit if we hit the threshold
     if (
       this.state === CircuitState.CLOSED && 
       this.failureCount >= this.options.failureThreshold
@@ -92,40 +83,33 @@ export class CircuitBreaker {
       await this.changeState(CircuitState.OPEN);
       console.log(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
     } else if (this.state === CircuitState.HALF_OPEN) {
-      // If failed during test, reopen the circuit
       await this.changeState(CircuitState.OPEN);
       console.log(`Circuit ${this.options.name} reopened after failed test`);
       this.successCount = 0;
     }
     
-    // Sync state to storage if available
     if (this.supabase) {
       await this.syncStateToStorage();
     }
   }
   
-  // Reset the circuit to closed state
   async reset(): Promise<void> {
     this.failureCount = 0;
     this.successCount = 0;
     await this.changeState(CircuitState.CLOSED);
     
-    // Sync state to storage if available
     if (this.supabase) {
       await this.syncStateToStorage();
     }
   }
   
-  // Change circuit state with proper logging
   private async changeState(newState: CircuitState): Promise<void> {
     const oldState = this.state;
     this.state = newState;
     this.lastStateChange = Date.now();
     
-    // Log state change
     console.log(`Circuit ${this.options.name} state changed from ${oldState} to ${newState}`);
     
-    // Log state change to database if we have a client
     if (this.supabase) {
       try {
         await this.supabase
@@ -147,7 +131,6 @@ export class CircuitBreaker {
     }
   }
   
-  // Log execution result for monitoring
   private async logExecution(success: boolean, durationMs: number, error?: any): Promise<void> {
     if (this.supabase) {
       try {
@@ -173,7 +156,6 @@ export class CircuitBreaker {
     }
   }
   
-  // Sync circuit state from storage
   private async syncStateFromStorage(): Promise<void> {
     try {
       const { data, error } = await this.supabase
@@ -194,7 +176,6 @@ export class CircuitBreaker {
         this.lastFailureTime = new Date(data.last_failure_time).getTime();
         this.lastStateChange = new Date(data.last_state_change).getTime();
         
-        // Automatically try half-open if we've passed the timeout
         if (this.state === CircuitState.OPEN && 
             Date.now() - this.lastFailureTime > this.options.resetTimeoutMs) {
           await this.changeState(CircuitState.HALF_OPEN);
@@ -205,7 +186,6 @@ export class CircuitBreaker {
     }
   }
   
-  // Sync circuit state to storage
   private async syncStateToStorage(): Promise<void> {
     try {
       await this.supabase
@@ -225,12 +205,10 @@ export class CircuitBreaker {
     }
   }
   
-  // Get current state
   getState(): CircuitState {
     return this.state;
   }
   
-  // Get detailed status
   getStatus(): any {
     return {
       name: this.options.name,
@@ -246,7 +224,6 @@ export class CircuitBreaker {
   }
 }
 
-// Enhanced registry to manage circuit breakers with DB persistence
 export class CircuitBreakerRegistry {
   private static circuits: Map<string, CircuitBreaker> = new Map();
   private static supabaseClient: any = null;
@@ -274,7 +251,6 @@ export class CircuitBreakerRegistry {
     return Array.from(this.circuits.values()).map(circuit => circuit.getStatus());
   }
   
-  // Load all circuit breakers from database
   static async loadFromStorage(): Promise<void> {
     if (!this.supabaseClient) {
       console.log('No Supabase client provided, skipping loading circuit breakers from storage');
