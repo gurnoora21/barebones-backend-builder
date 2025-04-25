@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from "../types.ts";
@@ -17,10 +16,10 @@ interface MaintenanceTask {
   run: (supabase: SupabaseClient<Database>) => Promise<any>;
 }
 
-// Define queue monitoring thresholds
+// Define monitoring thresholds
 const QUEUE_DEPTH_WARNING_THRESHOLD = 100; // Warn if more than 100 messages in queue
-const STALLED_MESSAGES_WARNING_THRESHOLD = 10; // Warn if more than 10 stalled messages
-const DLQ_THRESHOLD = 5; // Warn if DLQ has grown by 5+ messages since last check
+const ERROR_RATE_WARNING_THRESHOLD = 5; // Warn if error rate exceeds 5%
+const LATENCY_WARNING_THRESHOLD = 10000; // Warn if p95 latency exceeds 10 seconds
 
 async function performMaintenance(supabase: SupabaseClient<Database>): Promise<{ [key: string]: any }> {
   const results: { [key: string]: any } = {};
@@ -47,49 +46,70 @@ async function performMaintenance(supabase: SupabaseClient<Database>): Promise<{
       }
     },
     {
-      name: 'monitor_queue_depth',
-      description: 'Check all queues for excessive depth',
+      name: 'check_queue_health',
+      description: 'Monitor queue health metrics',
       run: async (client) => {
-        // Get queue names
-        const { data: queues, error: queueError } = await client.rpc('pgmq_list_queues');
-        if (queueError) throw queueError;
-        
-        const queueStats: Record<string, any> = {};
-        let totalMessages = 0;
-        
-        // For each queue, get stats
-        for (const queue of queues || []) {
-          const { data: queueInfo, error: infoError } = await client.rpc('pgmq_info', {
-            queue_name: queue.name
-          });
+        // Call our new queue health check function
+        const { data: healthData, error: healthError } = await client
+          .rpc('check_queue_health');
           
-          if (infoError) {
-            console.error(`Error getting info for queue ${queue.name}:`, infoError);
-            continue;
-          }
+        if (healthError) throw healthError;
+
+        // Process any warnings
+        const queueWarnings = (healthData || [])
+          .filter(q => q.status === 'WARNING')
+          .map(q => ({
+            queue: q.queue_name,
+            details: q.details
+          }));
           
-          if (queueInfo) {
-            queueStats[queue.name] = queueInfo;
-            totalMessages += queueInfo.approx_message_count || 0;
-            
-            // Log queue stats to database
-            await client.from('queue_depth_metrics').insert({
-              queue_name: queue.name,
-              message_count: queueInfo.approx_message_count || 0,
-              visible_count: queueInfo.approx_visible_messages || 0,
-              details: queueInfo
-            });
-            
-            // Check if queue depth exceeds threshold
-            if ((queueInfo.approx_message_count || 0) > QUEUE_DEPTH_WARNING_THRESHOLD) {
-              warnings.push(`Queue ${queue.name} has ${queueInfo.approx_message_count} messages, exceeding threshold of ${QUEUE_DEPTH_WARNING_THRESHOLD}`);
-            }
-          }
+        if (queueWarnings.length > 0) {
+          warnings.push(...queueWarnings.map(w => 
+            `Queue ${w.queue} has health issues: ${JSON.stringify(w.details)}`
+          ));
         }
+
+        return {
+          queue_health: healthData,
+          warnings: queueWarnings
+        };
+      }
+    },
+    {
+      name: 'analyze_queue_metrics',
+      description: 'Analyze queue processing metrics',
+      run: async (client) => {
+        // Get queue metrics
+        const { data: metricsData, error: metricsError } = await client
+          .from('queue_stats')
+          .select('*')
+          .order('hour', { ascending: false })
+          .limit(48); // Last 48 hours
+          
+        if (metricsError) throw metricsError;
         
-        return { 
-          queues: queueStats,
-          total_messages: totalMessages
+        // Get error rates
+        const { data: errorRates, error: errorRatesError } = await client
+          .from('queue_error_rates')
+          .select('*')
+          .order('time_bucket', { ascending: false })
+          .limit(12); // Last hour (5-minute buckets)
+          
+        if (errorRatesError) throw errorRatesError;
+        
+        // Get latency stats
+        const { data: latencyStats, error: latencyError } = await client
+          .from('queue_latency_stats')
+          .select('*')
+          .order('time_bucket', { ascending: false })
+          .limit(12);
+          
+        if (latencyError) throw latencyError;
+        
+        return {
+          metrics: metricsData,
+          error_rates: errorRates,
+          latency_stats: latencyStats
         };
       }
     },
@@ -305,7 +325,7 @@ async function performMaintenance(supabase: SupabaseClient<Database>): Promise<{
       }
     }
     
-    // Log maintenance run
+    // Log maintenance run with warnings
     const { error: logError } = await supabase
       .from('maintenance_logs')
       .insert({
@@ -315,17 +335,18 @@ async function performMaintenance(supabase: SupabaseClient<Database>): Promise<{
     
     if (logError) throw logError;
     
-    // If there are warnings, log them to a dedicated warnings table 
+    // If there are warnings, log them to worker issues
     if (warnings.length > 0) {
-      const { error: warningsError } = await supabase
-        .from('maintenance_warnings')
+      const { error: issueError } = await supabase
+        .from('worker_issues')
         .insert({
-          warnings,
-          details: results
+          worker_name: 'maintenance',
+          issue_type: 'health_warning',
+          details: { warnings }
         });
         
-      if (warningsError) {
-        console.error('Error logging warnings:', warningsError);
+      if (issueError) {
+        console.error('Error logging warnings:', issueError);
       }
     }
     

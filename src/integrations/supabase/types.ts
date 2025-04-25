@@ -194,6 +194,24 @@ export type Database = {
         }
         Relationships: []
       }
+      queue_health_logs: {
+        Row: {
+          checked_at: string | null
+          id: string
+          results: Json
+        }
+        Insert: {
+          checked_at?: string | null
+          id?: string
+          results: Json
+        }
+        Update: {
+          checked_at?: string | null
+          id?: string
+          results?: Json
+        }
+        Relationships: []
+      }
       queue_metrics: {
         Row: {
           details: Json | null
@@ -424,6 +442,26 @@ export type Database = {
         }
         Relationships: []
       }
+      queue_error_rates: {
+        Row: {
+          error_count: number | null
+          error_rate_percent: number | null
+          queue_name: string | null
+          time_bucket: string | null
+          total_messages: number | null
+        }
+        Relationships: []
+      }
+      queue_latency_stats: {
+        Row: {
+          avg_latency_ms: number | null
+          max_latency_ms: number | null
+          p95_latency_ms: number | null
+          queue_name: string | null
+          time_bucket: string | null
+        }
+        Relationships: []
+      }
       queue_stats: {
         Row: {
           avg_processing_ms: number | null
@@ -450,6 +488,27 @@ export type Database = {
       }
     }
     Functions: {
+      check_queue_health: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          queue_name: string
+          status: string
+          details: Json
+        }[]
+      }
+      get_queue_metrics: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          queue_name: string
+          pending_messages: number
+          max_retries: number
+          oldest_message_age: unknown
+        }[]
+      }
+      notify_queue_health_issues: {
+        Args: Record<PropertyKey, never>
+        Returns: undefined
+      }
       pgmq_archive: {
         Args: { queue_name: string; msg_id: number }
         Returns: boolean
