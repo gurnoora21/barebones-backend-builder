@@ -84,6 +84,24 @@ export type Database = {
         }
         Relationships: []
       }
+      maintenance_logs: {
+        Row: {
+          id: string
+          results: Json | null
+          timestamp: string | null
+        }
+        Insert: {
+          id?: string
+          results?: Json | null
+          timestamp?: string | null
+        }
+        Update: {
+          id?: string
+          results?: Json | null
+          timestamp?: string | null
+        }
+        Relationships: []
+      }
       normalized_tracks: {
         Row: {
           artist_id: string

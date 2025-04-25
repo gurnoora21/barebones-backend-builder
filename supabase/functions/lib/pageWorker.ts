@@ -82,8 +82,8 @@ export abstract class PageWorker<Msg> {
     try {
       const { data, error } = await this.supabase.rpc('pgmq_read', {
         queue_name: this.queueName,
-        vt: this.vtSeconds,
-        qty: 1 // Always read exactly one message
+        visibility_timeout: this.vtSeconds,
+        batch_size: 1
       });
       
       if (error) {

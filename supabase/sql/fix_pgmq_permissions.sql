@@ -19,6 +19,18 @@ GRANT EXECUTE ON FUNCTION pgmq.get_queues() TO anon;
 GRANT SELECT ON pgmq.pgmq_state TO anon;
 GRANT SELECT ON pgmq.messages TO anon;
 
+-- Create or replace the pgmq_read function with correct parameter names
+CREATE OR REPLACE FUNCTION public.pgmq_read(queue_name text, visibility_timeout integer, batch_size integer)
+ RETURNS TABLE(msg_id bigint, read_ct integer, enqueued_at timestamp with time zone, vt timestamp with time zone, message jsonb)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  RETURN QUERY SELECT m.msg_id, m.read_ct, m.enqueued_at, m.vt, m.message 
+  FROM pgmq.read(queue_name, visibility_timeout, batch_size) m;
+END;
+$function$;
+
 -- Create queues if they don't already exist
 DO $$
 BEGIN
