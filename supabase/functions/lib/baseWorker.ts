@@ -24,8 +24,8 @@ export abstract class BaseWorker<Msg> {
   async poll(): Promise<any[]> {
     const { data, error } = await this.supabase.rpc('pgmq_read', {
       queue_name: this.queueName,
-      vt: this.vtSeconds,
-      qty: this.batchSize
+      visibility_timeout: this.vtSeconds,
+      batch_size: this.batchSize
     });
     
     if (error) {
@@ -54,9 +54,9 @@ export abstract class BaseWorker<Msg> {
         await this.processMessage(msgBody, msgId);
         
         // Archive message on success to remove it
-        await this.supabase.rpc('pgmq_send', {
+        await this.supabase.rpc('pgmq_archive', {
           queue_name: this.queueName,
-          msg: msgId
+          msg_id: msgId
         });
         
         // Log success metric
@@ -82,7 +82,7 @@ export abstract class BaseWorker<Msg> {
           });
           
           // Archive so it doesn't reappear
-          await this.supabase.rpc('pgmq_send', {
+          await this.supabase.rpc('pgmq_archive', {
             queue_name: this.queueName,
             msg_id: msgId
           });

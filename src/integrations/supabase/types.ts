@@ -437,8 +437,16 @@ export type Database = {
       }
     }
     Functions: {
+      pgmq_archive: {
+        Args: { queue_name: string; msg_id: number }
+        Returns: boolean
+      }
       pgmq_read: {
-        Args: { queue_name: string; vt: number; qty: number }
+        Args: {
+          queue_name: string
+          visibility_timeout: number
+          batch_size: number
+        }
         Returns: {
           msg_id: number
           read_ct: number
