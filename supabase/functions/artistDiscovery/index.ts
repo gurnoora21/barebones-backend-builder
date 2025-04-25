@@ -21,58 +21,90 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
   protected async process(msg: ArtistDiscoveryMsg): Promise<void> {
     console.log(`Processing artist discovery message:`, msg);
     
+    // Enhanced logging for input validation
+    if (!msg.artistId && !msg.artistName) {
+      const errorMsg = 'No artist ID or name provided';
+      console.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+    
     let artistId = msg.artistId;
     
+    // Detailed logging for artist ID resolution
     if (!artistId && msg.artistName) {
       console.log(`Looking up artist ID for name: ${msg.artistName}`);
-      artistId = await getSpotifyArtistId(msg.artistName);
+      try {
+        artistId = await getSpotifyArtistId(msg.artistName);
+      } catch (error) {
+        console.error(`Failed to resolve artist ID for name ${msg.artistName}:`, error);
+        throw error;
+      }
       
       if (!artistId) {
-        throw new Error(`Artist not found: ${msg.artistName}`);
+        const errorMsg = `Artist not found: ${msg.artistName}`;
+        console.error(errorMsg);
+        throw new Error(errorMsg);
       }
       
       console.log(`Found artist ID: ${artistId} for name: ${msg.artistName}`);
     }
     
     if (!artistId) {
-      throw new Error('No artistId or artistName provided');
+      const errorMsg = 'No artistId or artistName provided';
+      console.error(errorMsg);
+      throw new Error(errorMsg);
     }
 
-    // Check if artist already exists
-    const { data: existingArtist } = await this.supabase
-      .from('artists')
-      .select('id')
-      .eq('spotify_id', artistId)
-      .single();
-
-    if (!existingArtist) {
-      // Insert new artist
-      const { error: insertError } = await this.supabase
+    // Additional error handling for database operations
+    try {
+      // Check if artist already exists
+      const { data: existingArtist, error: selectError } = await this.supabase
         .from('artists')
-        .insert({
-          spotify_id: artistId,
-          name: msg.artistName || artistId,
-          metadata: { 
-            source: 'spotify',
-            discovery_timestamp: new Date().toISOString()
-          }
-        });
+        .select('id')
+        .eq('spotify_id', artistId)
+        .single();
 
-      if (insertError) {
-        console.error('Error inserting artist:', insertError);
-        throw insertError;
+      if (selectError && selectError.code !== 'PGRST116') {  // Not a "no rows" error
+        console.error('Database select error:', selectError);
+        throw selectError;
       }
-      
-      console.log(`Created new artist record for: ${msg.artistName || artistId}`);
-    }
 
-    // Queue album discovery with offset 0
-    await this.enqueue('album_discovery', { 
-      artistId,
-      offset: 0
-    });
-    
-    console.log(`Enqueued album discovery task for artist ${artistId}`);
+      if (!existingArtist) {
+        // Insert new artist with expanded error handling
+        const { error: insertError } = await this.supabase
+          .from('artists')
+          .insert({
+            spotify_id: artistId,
+            name: msg.artistName || artistId,
+            metadata: { 
+              source: 'spotify',
+              discovery_timestamp: new Date().toISOString()
+            }
+          });
+
+        if (insertError) {
+          console.error('Error inserting artist:', insertError, 
+            'Artist Data:', { 
+              spotify_id: artistId, 
+              name: msg.artistName || artistId 
+            });
+          throw insertError;
+        }
+        
+        console.log(`Created new artist record for: ${msg.artistName || artistId}`);
+      }
+
+      // Queue album discovery with offset 0
+      await this.enqueue('album_discovery', { 
+        artistId,
+        offset: 0
+      });
+      
+      console.log(`Enqueued album discovery task for artist ${artistId}`);
+    } catch (error) {
+      console.error(`Comprehensive error in artist discovery:`, error);
+      throw error;  // Re-throw to allow PageWorker to handle
+    }
   }
 }
 
@@ -84,6 +116,9 @@ serve(async (req: Request) => {
   }
 
   try {
+    // Enhanced logging for function entry
+    console.log('Artist Discovery worker received request');
+
     if (req.method === 'POST') {
       try {
         const body = await req.json();
@@ -94,12 +129,15 @@ serve(async (req: Request) => {
             artistName: body.artistName
           });
           
-          return new Response(JSON.stringify({ success: true, message: 'Artist discovery task enqueued' }), { 
+          return new Response(JSON.stringify({ 
+            success: true, 
+            message: 'Artist discovery task enqueued' 
+          }), { 
             headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
           });
         }
       } catch (e) {
-        console.log("No valid JSON body or not adding a manual message");
+        console.log("No valid JSON body or not adding a manual message", e);
       }
     }
     
@@ -109,9 +147,12 @@ serve(async (req: Request) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
     });
   } catch (error) {
-    console.error("Worker execution error:", error);
+    console.error("Comprehensive worker execution error:", error);
     
-    return new Response(JSON.stringify({ error: error.message }), { 
+    return new Response(JSON.stringify({ 
+      error: error.message,
+      details: error.stack 
+    }), { 
       status: 500, 
       headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
     });
