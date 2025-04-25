@@ -406,6 +406,30 @@ export type Database = {
           },
         ]
       }
+      worker_issues: {
+        Row: {
+          created_at: string
+          details: Json | null
+          id: string
+          issue_type: string
+          worker_name: string
+        }
+        Insert: {
+          created_at?: string
+          details?: Json | null
+          id?: string
+          issue_type: string
+          worker_name: string
+        }
+        Update: {
+          created_at?: string
+          details?: Json | null
+          id?: string
+          issue_type?: string
+          worker_name?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       dead_letter_analysis: {

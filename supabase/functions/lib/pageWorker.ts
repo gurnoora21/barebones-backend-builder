@@ -1,4 +1,3 @@
-
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 import { globalCache } from './cache.ts';
