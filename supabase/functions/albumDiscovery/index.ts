@@ -1,7 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getArtistAlbums, wait } from "../lib/spotifyClient.ts";
+import { getArtistAlbums, getTrackDetails, wait } from "../lib/spotifyClient.ts";
 
 interface AlbumDiscoveryMsg {
   artistId: string;
@@ -42,13 +42,26 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
     return null;
   }
 
+  // Verifies if the album belongs to the specified artist as a primary artist
+  private async isArtistPrimaryOnAlbum(album: any, artistId: string): Promise<boolean> {
+    // Check if the artist is listed as the first artist
+    const primaryArtistId = album.artists && album.artists.length > 0
+      ? album.artists[0].id
+      : null;
+    
+    console.log(`Checking album "${album.name}" - Primary artist ID: ${primaryArtistId}, Target artist ID: ${artistId}`);
+    
+    // If the first artist matches our target artist, this is what we want
+    return primaryArtistId === artistId;
+  }
+
   protected async process(msg: AlbumDiscoveryMsg): Promise<void> {
     const { artistId, offset } = msg;
     console.log(`Processing album discovery for artist ${artistId} with offset ${offset}`);
     
     try {
       const albums = await getArtistAlbums(artistId, offset);
-      console.log(`Found ${albums.items.length} albums for artist ${artistId}`);
+      console.log(`Found ${albums.items.length} potential albums for artist ${artistId}`);
 
       // Get artist UUID from our database
       const { data: artist, error: artistError } = await this.supabase
@@ -68,10 +81,29 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
         throw new Error(errorMsg);
       }
       
+      let validAlbumsCount = 0;
+      let filteredAlbumsCount = 0;
+      
       for (let i = 0; i < albums.items.length; i++) {
         const album = albums.items[i];
         
         try {
+          // Verify this is a primary artist album - the first artist should be our target
+          const isPrimaryArtist = await this.isArtistPrimaryOnAlbum(album, artistId);
+          
+          if (!isPrimaryArtist) {
+            console.log(`Skipping album "${album.name}" as ${artistId} is not the primary artist`);
+            filteredAlbumsCount++;
+            continue;
+          }
+          
+          // Exclude compilations and appears_on album types
+          if (album.album_type === 'compilation' || album.album_group === 'appears_on') {
+            console.log(`Skipping album "${album.name}" of type ${album.album_type || album.album_group}`);
+            filteredAlbumsCount++;
+            continue;
+          }
+          
           // Format the release date properly
           const formattedReleaseDate = this.formatReleaseDate(album.release_date);
           
@@ -128,6 +160,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           });
           
           console.log(`Enqueued track discovery for album: ${album.name} (${album.id})`);
+          validAlbumsCount++;
           
           // Add a small delay every few albums to avoid rate limiting
           if (i > 0 && i % 5 === 0) {
@@ -140,8 +173,11 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
         }
       }
       
-      // If there are more albums, queue the next page
-      if (offset + albums.items.length < albums.total) {
+      console.log(`Processed ${albums.items.length} albums, valid: ${validAlbumsCount}, filtered: ${filteredAlbumsCount}`);
+      
+      // If there are more albums, queue the next page - but only if we found valid albums
+      // If we didn't find any valid albums on this page, we might want to stop here to prevent unnecessary API calls
+      if (offset + albums.items.length < albums.total && validAlbumsCount > 0) {
         const newOffset = offset + albums.items.length;
         
         await this.enqueue('album_discovery', { artistId, offset: newOffset });

@@ -126,7 +126,9 @@ export async function getSpotifyArtistId(name: string): Promise<string | null> {
 }
 
 export async function getArtistAlbums(artistId: string, offset = 0): Promise<any> {
-  return spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single,appears_on,compilation&limit=50&offset=${offset}`);
+  // Restrict to only albums, singles and compilations where the artist is a primary artist
+  // The API doesn't have a direct way to filter for primary artist, but we'll get only direct releases
+  return spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
 }
 
 export async function getAlbumTracks(albumId: string, offset = 0): Promise<any> {

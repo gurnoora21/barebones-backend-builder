@@ -1,7 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getAlbumTracks, wait } from "../lib/spotifyClient.ts";
+import { getAlbumTracks, getTrackDetails, wait } from "../lib/spotifyClient.ts";
 
 interface TrackDiscoveryMsg {
   albumId: string;
@@ -29,6 +29,28 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       .replace(/[^\w\s]/g, '') // Remove special characters
       .trim()
       .replace(/\s+/g, ' '); // Normalize whitespace
+  }
+
+  // Check if the artist is the primary artist on this track
+  private async isArtistPrimaryOnTrack(track: any, artistId: string): Promise<boolean> {
+    // For simple check, we'll look if the artist is the first in the artists array
+    if (track.artists && track.artists.length > 0) {
+      const primaryArtistId = track.artists[0].id;
+      return primaryArtistId === artistId;
+    }
+    
+    // If we need more details that aren't in the basic track info, we fetch full track details
+    try {
+      const details = await getTrackDetails(track.id);
+      if (details.artists && details.artists.length > 0) {
+        const primaryArtistId = details.artists[0].id;
+        return primaryArtistId === artistId;
+      }
+    } catch (error) {
+      console.error(`Error fetching track details for ${track.id}:`, error);
+    }
+    
+    return false;
   }
 
   protected async process(msg: TrackDiscoveryMsg): Promise<void> {
@@ -90,11 +112,24 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         });
       }
       
+      let validTracksCount = 0;
+      let filteredTracksCount = 0;
+      
       for (let i = 0; i < tracks.items.length; i++) {
         const track = tracks.items[i];
-        const normalizedName = this.normalizeTrackName(track.name);
         
         try {
+          // Verify this is a track where our artist is primary
+          const isPrimaryArtist = await this.isArtistPrimaryOnTrack(track, artistId);
+          
+          if (!isPrimaryArtist) {
+            console.log(`Skipping track "${track.name}" as ${artistId} is not the primary artist`);
+            filteredTracksCount++;
+            continue;
+          }
+          
+          const normalizedName = this.normalizeTrackName(track.name);
+          
           // Insert or update track in our database
           const { data: existingTrack, error: selectError } = await this.supabase
             .from('tracks')
@@ -184,6 +219,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           });
           
           console.log(`Enqueued producer identification for track: ${track.name} (${track.id})`);
+          validTracksCount++;
           
           if (i > 0 && i % 5 === 0) {
             await wait(200);
@@ -194,7 +230,10 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         }
       }
       
-      if (offset + tracks.items.length < tracks.total) {
+      console.log(`Processed ${tracks.items.length} tracks, valid: ${validTracksCount}, filtered: ${filteredTracksCount}`);
+      
+      // If there are more tracks and we found valid tracks on this page, queue the next page
+      if (offset + tracks.items.length < tracks.total && validTracksCount > 0) {
         const newOffset = offset + tracks.items.length;
         
         await this.enqueue('track_discovery', {
