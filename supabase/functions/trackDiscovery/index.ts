@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, getTrackDetails, wait } from "../lib/spotifyClient.ts";
@@ -33,24 +32,19 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
 
   // Check if the artist is the primary artist on this track
   private async isArtistPrimaryOnTrack(track: any, artistId: string): Promise<boolean> {
-    // For simple check, we'll look if the artist is the first in the artists array
     if (track.artists && track.artists.length > 0) {
       const primaryArtistId = track.artists[0].id;
       return primaryArtistId === artistId;
     }
     
-    // If we need more details that aren't in the basic track info, we fetch full track details
+    // If we need more details that aren't in the basic track info
     try {
       const details = await getTrackDetails(track.id);
-      if (details.artists && details.artists.length > 0) {
-        const primaryArtistId = details.artists[0].id;
-        return primaryArtistId === artistId;
-      }
+      return details.artists && details.artists.length > 0 && details.artists[0].id === artistId;
     } catch (error) {
       console.error(`Error fetching track details for ${track.id}:`, error);
+      return false;
     }
-    
-    return false;
   }
 
   protected async process(msg: TrackDiscoveryMsg): Promise<void> {
@@ -58,66 +52,35 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     console.log(`Processing track discovery for album ${albumName} (${albumId}) with offset ${offset}`);
     
     try {
-      // Get artist record from database using Spotify ID
+      // Get artist record from database
       const { data: artistData, error: artistError } = await this.supabase
         .from('artists')
         .select('id')
         .eq('spotify_id', artistId)
         .single();
 
-      if (artistError) {
-        console.error(`Error finding artist with Spotify ID ${artistId}:`, artistError);
-        throw this.categorizeError({
-          category: "MISSING_RECORD",
-          message: `Artist with Spotify ID ${artistId} not found in database`,
-          retryable: false
-        });
+      if (artistError || !artistData) {
+        throw new Error(`Artist ${artistId} not found in database`);
       }
 
-      if (!artistData) {
-        throw this.categorizeError({
-          category: "MISSING_RECORD",
-          message: `Artist with Spotify ID ${artistId} not found in database`,
-          retryable: false
-        });
-      }
-
-      const artistUuid = artistData.id;
-      console.log(`Found artist UUID ${artistUuid} for Spotify ID ${artistId}`);
-      
       const tracks = await getAlbumTracks(albumId, offset);
-      console.log(`Found ${tracks.items.length} tracks in album ${albumName}`);
+      console.log(`Found ${tracks.items.length} potential tracks in album ${albumName}`);
 
-      // Get album UUID from our database
+      // Get album UUID from database
       const { data: album, error: albumError } = await this.supabase
         .from('albums')
         .select('id')
         .eq('spotify_id', albumId)
         .single();
 
-      if (albumError) {
-        console.error(`Error finding album ${albumId} in database:`, albumError);
-        throw this.categorizeError({
-          category: "MISSING_RECORD",
-          message: `Album with Spotify ID ${albumId} not found in database`,
-          retryable: false
-        });
-      }
-
-      if (!album) {
-        throw this.categorizeError({
-          category: "MISSING_RECORD",
-          message: `Album with Spotify ID ${albumId} not found in database`,
-          retryable: false
-        });
+      if (albumError || !album) {
+        throw new Error(`Album ${albumId} not found in database`);
       }
       
       let validTracksCount = 0;
       let filteredTracksCount = 0;
       
-      for (let i = 0; i < tracks.items.length; i++) {
-        const track = tracks.items[i];
-        
+      for (const track of tracks.items) {
         try {
           // Verify this is a track where our artist is primary
           const isPrimaryArtist = await this.isArtistPrimaryOnTrack(track, artistId);
@@ -179,7 +142,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
               .from('normalized_tracks')
               .select('id, representative_track_id')
               .eq('normalized_name', normalizedName)
-              .eq('artist_id', artistUuid) // Use artist UUID, not Spotify ID
+              .eq('artist_id', artistId) // Use artist UUID, not Spotify ID
               .single();
 
             if (normalizedSelectError && normalizedSelectError.code !== 'PGRST116') { // Not a "no rows" error
@@ -192,7 +155,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
                 .from('normalized_tracks')
                 .insert({
                   normalized_name: normalizedName,
-                  artist_id: artistUuid, // Use artist UUID, not Spotify ID
+                  artist_id: artistId, // Use artist UUID, not Spotify ID
                   representative_track_id: trackId
                 });
 
@@ -219,37 +182,32 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           });
           
           console.log(`Enqueued producer identification for track: ${track.name} (${track.id})`);
-          validTracksCount++;
           
-          if (i > 0 && i % 5 === 0) {
-            await wait(200);
-          }
+          validTracksCount++;
+          await wait(200); // Rate limiting protection
         } catch (trackError) {
-          console.error(`Error processing track ${track.name} (${track.id}):`, trackError);
-          // Continue with next track even if one fails
+          console.error(`Error processing track ${track.name}:`, trackError);
         }
       }
       
       console.log(`Processed ${tracks.items.length} tracks, valid: ${validTracksCount}, filtered: ${filteredTracksCount}`);
       
-      // If there are more tracks and we found valid tracks on this page, queue the next page
-      if (offset + tracks.items.length < tracks.total && validTracksCount > 0) {
+      // Queue next page if there are more tracks and we found valid ones
+      if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && validTracksCount > 0) {
         const newOffset = offset + tracks.items.length;
-        
         await this.enqueue('track_discovery', {
           albumId,
           albumName,
           artistId,
           offset: newOffset
         });
-        
-        console.log(`Enqueued next page of tracks for album ${albumName} with offset ${newOffset}`);
+        console.log(`Enqueued next page of tracks for album ${albumName}`);
       } else {
         console.log(`Finished processing all tracks for album ${albumName}`);
       }
     } catch (error) {
-      console.error(`Comprehensive error in track discovery for album ${albumName} (${albumId}):`, error);
-      throw error; // Re-throw to allow PageWorker to handle
+      console.error(`Error in track discovery for album ${albumName}:`, error);
+      throw error;
     }
   }
 }

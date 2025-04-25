@@ -1,4 +1,3 @@
-
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 let spotifyAccessToken: string | null = null;
 let spotifyTokenExpiry = 0;
@@ -114,7 +113,13 @@ async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
   }, 600000); // 10 minute cache TTL for Spotify data
 }
 
-// Specific Spotify helper functions
+// Helper function to verify artist is primary on a Spotify item
+function isArtistPrimary(item: any, artistId: string): boolean {
+  return item.artists && 
+         item.artists.length > 0 && 
+         item.artists[0].id === artistId;
+}
+
 export async function getSpotifyArtistId(name: string): Promise<string | null> {
   try {
     const data = await spotifyApi<any>(`search?q=${encodeURIComponent(name)}&type=artist&limit=1`);
@@ -126,9 +131,27 @@ export async function getSpotifyArtistId(name: string): Promise<string | null> {
 }
 
 export async function getArtistAlbums(artistId: string, offset = 0): Promise<any> {
-  // Restrict to only albums, singles and compilations where the artist is a primary artist
-  // The API doesn't have a direct way to filter for primary artist, but we'll get only direct releases
-  return spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
+  // Only get albums and singles where the artist is the primary artist
+  // We'll filter further in the results to ensure they're truly primary artist releases
+  const albums = await spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
+  
+  if (albums && albums.items) {
+    // Filter to only include albums where the specified artist is the primary artist
+    albums.items = albums.items.filter(album => {
+      // Exclude compilations and appears_on album types
+      if (album.album_type === 'compilation' || album.album_group === 'appears_on') {
+        return false;
+      }
+      
+      // Ensure the specified artist is the primary artist
+      return isArtistPrimary(album, artistId);
+    });
+    
+    // Update the total count to reflect our filtered results
+    albums.total = albums.items.length;
+  }
+  
+  return albums;
 }
 
 export async function getAlbumTracks(albumId: string, offset = 0): Promise<any> {
