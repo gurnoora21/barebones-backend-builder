@@ -2,7 +2,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from 'sonner';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import QueueMonitor from "./pages/QueueMonitor";
+import NotFound from "./pages/NotFound";
 import "./App.css";
 
 // Create a client
@@ -21,8 +21,8 @@ export default function App() {
       <BrowserRouter>
         <Toaster position="top-center" />
         <Routes>
-          <Route path="/" element={<QueueMonitor />} />
-          <Route path="*" element={<div>Queue Monitor</div>} />
+          <Route path="/" element={<NotFound />} />
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
     </QueryClientProvider>
