@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, getTrackDetails, wait } from "../lib/spotifyClient.ts";
@@ -62,6 +63,9 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       if (artistError || !artistData) {
         throw new Error(`Artist ${artistId} not found in database`);
       }
+
+      // Use the artist UUID from the database for all further operations
+      const artistUuid = artistData.id;
 
       const tracks = await getAlbumTracks(albumId, offset);
       console.log(`Found ${tracks.items.length} potential tracks in album ${albumName}`);
@@ -142,7 +146,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
               .from('normalized_tracks')
               .select('id, representative_track_id')
               .eq('normalized_name', normalizedName)
-              .eq('artist_id', artistId) // Use artist UUID, not Spotify ID
+              .eq('artist_id', artistUuid) // Use artist UUID, not Spotify ID
               .single();
 
             if (normalizedSelectError && normalizedSelectError.code !== 'PGRST116') { // Not a "no rows" error
@@ -155,7 +159,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
                 .from('normalized_tracks')
                 .insert({
                   normalized_name: normalizedName,
-                  artist_id: artistId, // Use artist UUID, not Spotify ID
+                  artist_id: artistUuid, // Use artist UUID, not Spotify ID
                   representative_track_id: trackId
                 });
 
