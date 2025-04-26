@@ -60,25 +60,34 @@ export type Database = {
       artists: {
         Row: {
           created_at: string | null
+          genres: string[] | null
           id: string
+          market: string | null
           metadata: Json | null
           name: string
+          popularity: number | null
           spotify_id: string | null
           updated_at: string | null
         }
         Insert: {
           created_at?: string | null
+          genres?: string[] | null
           id?: string
+          market?: string | null
           metadata?: Json | null
           name: string
+          popularity?: number | null
           spotify_id?: string | null
           updated_at?: string | null
         }
         Update: {
           created_at?: string | null
+          genres?: string[] | null
           id?: string
+          market?: string | null
           metadata?: Json | null
           name?: string
+          popularity?: number | null
           spotify_id?: string | null
           updated_at?: string | null
         }
@@ -278,6 +287,71 @@ export type Database = {
           key?: string
           updated_at?: string | null
           window_end?: number
+        }
+        Relationships: []
+      }
+      seeding_artists: {
+        Row: {
+          details: Json | null
+          job_id: string
+          processed_at: string | null
+          spotify_id: string
+          success: boolean | null
+        }
+        Insert: {
+          details?: Json | null
+          job_id: string
+          processed_at?: string | null
+          spotify_id: string
+          success?: boolean | null
+        }
+        Update: {
+          details?: Json | null
+          job_id?: string
+          processed_at?: string | null
+          spotify_id?: string
+          success?: boolean | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "seeding_artists_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "seeding_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      seeding_jobs: {
+        Row: {
+          completed_at: string | null
+          config: Json
+          id: string
+          job_type: string
+          progress: Json | null
+          results: Json | null
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          completed_at?: string | null
+          config: Json
+          id?: string
+          job_type: string
+          progress?: Json | null
+          results?: Json | null
+          started_at?: string | null
+          status?: string
+        }
+        Update: {
+          completed_at?: string | null
+          config?: Json
+          id?: string
+          job_type?: string
+          progress?: Json | null
+          results?: Json | null
+          started_at?: string | null
+          status?: string
         }
         Relationships: []
       }

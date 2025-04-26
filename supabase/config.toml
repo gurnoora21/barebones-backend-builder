@@ -75,3 +75,6 @@ verify_jwt = false
 
 [functions.maintenance]
 verify_jwt = false
+
+[functions.artistSeeder]
+verify_jwt = false
