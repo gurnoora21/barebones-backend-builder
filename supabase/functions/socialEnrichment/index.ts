@@ -17,9 +17,14 @@ const corsHeaders = {
 const SEARCH_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 const PROFILE_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
-// Instagram API constants
-const INSTAGRAM_API_APP_ID = '936619743392459'; // Public ID used by Instagram web
-const INSTAGRAM_PROFILE_API = 'https://i.instagram.com/api/v1/users/web_profile_info/?username=';
+// User-Agent rotation list
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'
+];
 
 // Search result scoring weights
 const SCORE_WEIGHTS = {
@@ -68,10 +73,14 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       
       console.log(`Enriching social profile for ${producerName} (roles: ${roles.join(', ')})`);
       
-      // Find Instagram profile with the new approach
+      // Find Instagram profile with the updated approach
+      let instagramProfile: InstagramProfile | null = null;
+      let enrichmentFailed = false;
+      let extractedEmail: string | null = null;
+
       await this.traceOperation('findInstagramProfile', async () => {
         try {
-          const instagramProfile = await this.findBestInstagramProfile(producerName, roles);
+          instagramProfile = await this.findBestInstagramProfile(producerName, roles);
           if (instagramProfile) {
             socialProfiles.instagram = instagramProfile.url;
             socialProfiles.instagram_data = {
@@ -84,14 +93,24 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
               posts: instagramProfile.posts,
               confidence_score: instagramProfile.score,
             };
+            
+            // Extract email from bio or external URL if present
+            const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/g;
+            const bioEmails = instagramProfile.bio.match(emailRegex);
+            if (bioEmails && bioEmails.length > 0) {
+              extractedEmail = bioEmails[0].toLowerCase();
+            }
+            
             console.log(`Found Instagram profile for ${producerName}: ${instagramProfile.url}`);
           } else {
             console.log(`No suitable Instagram profile found for ${producerName}`);
+            enrichmentFailed = true;
             // Fall back to basic profile URL construction if we couldn't find a better match
             socialProfiles.instagram = `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`;
           }
         } catch (error) {
           console.error(`Error finding Instagram profile for ${producerName}:`, error);
+          enrichmentFailed = true;
           // Fall back to basic profile URL if there was an error in the enhanced process
           socialProfiles.instagram = `https://instagram.com/${encodeURIComponent(producerName.replace(/\s+/g, ''))}`;
         }
@@ -117,17 +136,30 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
         }
       });
 
-      // Update producer metadata with social profiles
+      // Update producer metadata with social profiles and enrichment info
       await this.traceOperation('updateProducer', async () => {
+        const updateData: Record<string, any> = {
+          metadata: {
+            ...producer.metadata,
+            social_profiles: socialProfiles,
+            last_enriched: new Date().toISOString()
+          },
+          enriched_at: new Date().toISOString(),
+          enrichment_failed: enrichmentFailed
+        };
+
+        // Only update these fields if we have a valid Instagram profile
+        if (instagramProfile) {
+          updateData.instagram_handle = instagramProfile.username;
+          updateData.instagram_bio = instagramProfile.bio;
+          if (extractedEmail) {
+            updateData.email = extractedEmail;
+          }
+        }
+
         const { error: updateError } = await this.supabase
           .from('producers')
-          .update({
-            metadata: {
-              ...producer.metadata,
-              social_profiles: socialProfiles,
-              last_enriched: new Date().toISOString()
-            }
-          })
+          .update(updateData)
           .eq('id', producer.id);
 
         if (updateError) {
@@ -138,6 +170,21 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       
       console.log(`Completed social enrichment for ${producerName}`);
     });
+  }
+
+  // Helper function to get a random UA and create standard headers
+  private getRequestHeaders(): Record<string, string> {
+    const randomUserAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    return {
+      'User-Agent': randomUserAgent,
+      'Accept': 'application/json',
+      'Referer': 'https://www.instagram.com/'
+    };
+  }
+
+  // Helper function to wait for a specified time
+  private async throttleRequest(ms = 1000): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private async findBestInstagramProfile(producerName: string, roles: string[]): Promise<InstagramProfile | null> {
@@ -173,6 +220,7 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       
       for (const profile of potentialProfiles.slice(0, 3)) { // Only check top 3 to limit API calls
         try {
+          await this.throttleRequest(); // Respect rate limits
           const profileData = await this.getInstagramProfileInfo(profile.username);
           if (!profileData) continue;
           
@@ -181,9 +229,6 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
             ...profileData,
             score
           });
-          
-          // Short delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error) {
           console.warn(`Error fetching profile for ${profile.username}:`, error);
           // Continue to next profile
@@ -226,9 +271,7 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       console.log(`Searching DuckDuckGo for Instagram profiles: ${query}`);
       
       const response = await fetch(searchUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers: this.getRequestHeaders()
       });
       
       if (!response.ok) {
@@ -297,13 +340,11 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
       
       console.log(`Fetching Instagram profile info for: ${username}`);
       
-      const url = `${INSTAGRAM_PROFILE_API}${encodeURIComponent(username)}`;
+      // Use the new Instagram API endpoint
+      const url = `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`;
       
       const response = await fetch(url, {
-        headers: {
-          'x-ig-app-id': INSTAGRAM_API_APP_ID,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers: this.getRequestHeaders()
       });
       
       if (!response.ok) {
@@ -316,18 +357,25 @@ class SocialEnrichmentWorker extends PageWorker<SocialEnrichmentMsg> {
         return null;
       }
       
-      const data = await response.json();
+      let data: any;
+      try {
+        data = await response.json();
+      } catch (error) {
+        console.error(`Failed to parse Instagram response as JSON for ${username}:`, error);
+        return null;
+      }
       
-      if (!data.data?.user) {
+      // Check for the expected data structure
+      if (!data.graphql?.user) {
         console.log(`No user data returned for: ${username}`);
         return null;
       }
       
-      const user = data.data.user;
+      const user = data.graphql.user;
       
       const profile: InstagramProfile = {
         username: user.username,
-        fullName: user.full_name,
+        fullName: user.full_name || '',
         bio: user.biography || '',
         externalUrl: user.external_url || '',
         verified: user.is_verified || false,
