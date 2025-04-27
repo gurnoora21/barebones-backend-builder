@@ -71,11 +71,21 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         throw selectError;
       }
 
+      // Extract followers count properly, ensuring it's a number
+      let followersCount = null;
+      if (artistDetails.followers) {
+        if (typeof artistDetails.followers === 'number') {
+          followersCount = artistDetails.followers;
+        } else if (typeof artistDetails.followers === 'object' && artistDetails.followers !== null) {
+          followersCount = artistDetails.followers.total || null;
+        }
+      }
+
       // Prepare artist update data
       const artistUpdateData = {
         spotify_id: artistId,
         name: msg.artistName || artistDetails.name,
-        followers: artistDetails.followers,
+        followers: followersCount, // Use the extracted followers count
         popularity: artistDetails.popularity,
         metadata: { 
           ...existingArtist?.metadata,
