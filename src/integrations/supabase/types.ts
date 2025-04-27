@@ -206,7 +206,12 @@ export type Database = {
       producers: {
         Row: {
           created_at: string | null
+          email: string | null
+          enriched_at: string | null
+          enrichment_failed: boolean | null
           id: string
+          instagram_bio: string | null
+          instagram_handle: string | null
           metadata: Json | null
           name: string
           normalized_name: string
@@ -214,7 +219,12 @@ export type Database = {
         }
         Insert: {
           created_at?: string | null
+          email?: string | null
+          enriched_at?: string | null
+          enrichment_failed?: boolean | null
           id?: string
+          instagram_bio?: string | null
+          instagram_handle?: string | null
           metadata?: Json | null
           name: string
           normalized_name: string
@@ -222,7 +232,12 @@ export type Database = {
         }
         Update: {
           created_at?: string | null
+          email?: string | null
+          enriched_at?: string | null
+          enrichment_failed?: boolean | null
           id?: string
+          instagram_bio?: string | null
+          instagram_handle?: string | null
           metadata?: Json | null
           name?: string
           normalized_name?: string
@@ -537,6 +552,30 @@ export type Database = {
         }
         Relationships: []
       }
+      worker_status: {
+        Row: {
+          is_paused: boolean
+          last_updated: string | null
+          paused_at: string | null
+          paused_by: string | null
+          worker_name: string
+        }
+        Insert: {
+          is_paused?: boolean
+          last_updated?: string | null
+          paused_at?: string | null
+          paused_by?: string | null
+          worker_name: string
+        }
+        Update: {
+          is_paused?: boolean
+          last_updated?: string | null
+          paused_at?: string | null
+          paused_by?: string | null
+          worker_name?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       dead_letter_analysis: {
@@ -635,6 +674,10 @@ export type Database = {
           max_retries: number
           oldest_message_age: unknown
         }[]
+      }
+      is_worker_paused: {
+        Args: { worker: string }
+        Returns: boolean
       }
       notify_queue_health_issues: {
         Args: Record<PropertyKey, never>

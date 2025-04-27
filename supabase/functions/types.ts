@@ -66,6 +66,34 @@ export interface Database {
           results: any;
         };
       };
+      producers: {
+        Row: {
+          id: string;
+          name: string;
+          normalized_name: string;
+          metadata: any | null;
+          created_at: string | null;
+          updated_at: string | null;
+          enriched_at: string | null;
+          enrichment_failed: boolean | null;
+          instagram_handle: string | null;
+          instagram_bio: string | null;
+          email: string | null;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          normalized_name: string;
+          metadata?: any | null;
+          created_at?: string | null;
+          updated_at?: string | null;
+          enriched_at?: string | null;
+          enrichment_failed?: boolean | null;
+          instagram_handle?: string | null;
+          instagram_bio?: string | null;
+          email?: string | null;
+        };
+      };
     };
     Functions: {
       pgmq_read: {
