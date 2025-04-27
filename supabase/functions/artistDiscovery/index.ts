@@ -1,7 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getSpotifyArtistId } from "../lib/spotifyClient.ts";
+import { getSpotifyArtistId, spotifyApi } from "../lib/spotifyClient.ts";
 
 interface ArtistDiscoveryMsg {
   artistId?: string;
@@ -55,8 +55,10 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       throw new Error(errorMsg);
     }
 
-    // Additional error handling for database operations
     try {
+      // Fetch additional artist details from Spotify
+      const artistDetails = await spotifyApi<any>(`artists/${artistId}`);
+      
       // Check if artist already exists
       const { data: existingArtist, error: selectError } = await this.supabase
         .from('artists')
@@ -69,30 +71,43 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         throw selectError;
       }
 
-      if (!existingArtist) {
-        // Insert new artist with expanded error handling
-        const { error: insertError } = await this.supabase
-          .from('artists')
-          .insert({
-            spotify_id: artistId,
-            name: msg.artistName || artistId,
-            metadata: { 
-              source: 'spotify',
-              discovery_timestamp: new Date().toISOString()
-            }
-          });
-
-        if (insertError) {
-          console.error('Error inserting artist:', insertError, 
-            'Artist Data:', { 
-              spotify_id: artistId, 
-              name: msg.artistName || artistId 
-            });
-          throw insertError;
+      // Prepare artist update data
+      const artistUpdateData = {
+        spotify_id: artistId,
+        name: msg.artistName || artistDetails.name,
+        followers: artistDetails.followers,
+        popularity: artistDetails.popularity,
+        metadata: { 
+          ...existingArtist?.metadata,
+          source: 'spotify',
+          discovery_timestamp: new Date().toISOString()
         }
-        
-        console.log(`Created new artist record for: ${msg.artistName || artistId}`);
+      };
+
+      let insertOrUpdateResult;
+      if (!existingArtist) {
+        // Insert new artist
+        insertOrUpdateResult = await this.supabase
+          .from('artists')
+          .insert(artistUpdateData)
+          .select('id')
+          .single();
+      } else {
+        // Update existing artist
+        insertOrUpdateResult = await this.supabase
+          .from('artists')
+          .update(artistUpdateData)
+          .eq('spotify_id', artistId)
+          .select('id')
+          .single();
       }
+
+      if (insertOrUpdateResult.error) {
+        console.error('Error inserting/updating artist:', insertOrUpdateResult.error);
+        throw insertOrUpdateResult.error;
+      }
+      
+      console.log(`Created/Updated artist record: ${msg.artistName || artistDetails.name}`);
 
       // Queue album discovery with offset 0
       await this.enqueue('album_discovery', { 

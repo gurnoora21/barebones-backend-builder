@@ -60,35 +60,44 @@ export type Database = {
       artists: {
         Row: {
           created_at: string | null
+          followers: number | null
           genres: string[] | null
           id: string
+          instagram_handle: string | null
           market: string | null
           metadata: Json | null
           name: string
           popularity: number | null
           spotify_id: string | null
+          twitter_handle: string | null
           updated_at: string | null
         }
         Insert: {
           created_at?: string | null
+          followers?: number | null
           genres?: string[] | null
           id?: string
+          instagram_handle?: string | null
           market?: string | null
           metadata?: Json | null
           name: string
           popularity?: number | null
           spotify_id?: string | null
+          twitter_handle?: string | null
           updated_at?: string | null
         }
         Update: {
           created_at?: string | null
+          followers?: number | null
           genres?: string[] | null
           id?: string
+          instagram_handle?: string | null
           market?: string | null
           metadata?: Json | null
           name?: string
           popularity?: number | null
           spotify_id?: string | null
+          twitter_handle?: string | null
           updated_at?: string | null
         }
         Relationships: []
@@ -458,7 +467,9 @@ export type Database = {
           id: string
           metadata: Json | null
           name: string
+          popularity: number | null
           spotify_id: string | null
+          spotify_preview_url: string | null
           updated_at: string | null
         }
         Insert: {
@@ -468,7 +479,9 @@ export type Database = {
           id?: string
           metadata?: Json | null
           name: string
+          popularity?: number | null
           spotify_id?: string | null
+          spotify_preview_url?: string | null
           updated_at?: string | null
         }
         Update: {
@@ -478,7 +491,9 @@ export type Database = {
           id?: string
           metadata?: Json | null
           name?: string
+          popularity?: number | null
           spotify_id?: string | null
+          spotify_preview_url?: string | null
           updated_at?: string | null
         }
         Relationships: [

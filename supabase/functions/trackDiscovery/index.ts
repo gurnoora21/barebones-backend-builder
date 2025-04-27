@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, getTrackDetails, wait } from "../lib/spotifyClient.ts";
@@ -86,8 +85,13 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       
       for (const track of tracks.items) {
         try {
+          // Fetch detailed track information from Spotify
+          const trackDetails = await getTrackDetails(track.id);
+          
           // Verify this is a track where our artist is primary
-          const isPrimaryArtist = await this.isArtistPrimaryOnTrack(track, artistId);
+          const isPrimaryArtist = track.artists && 
+                                   track.artists.length > 0 && 
+                                   track.artists[0].id === artistId;
           
           if (!isPrimaryArtist) {
             console.log(`Skipping track "${track.name}" as ${artistId} is not the primary artist`);
@@ -97,7 +101,23 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           
           const normalizedName = this.normalizeTrackName(track.name);
           
-          // Insert or update track in our database
+          // Prepare track update data
+          const trackUpdateData = {
+            spotify_id: track.id,
+            album_id: album.id,
+            name: track.name,
+            duration_ms: track.duration_ms,
+            popularity: trackDetails.popularity,
+            spotify_preview_url: trackDetails.preview_url,
+            metadata: {
+              source: 'spotify',
+              disc_number: track.disc_number,
+              track_number: track.track_number,
+              discovery_timestamp: new Date().toISOString()
+            }
+          };
+
+          // Insert or update track
           const { data: existingTrack, error: selectError } = await this.supabase
             .from('tracks')
             .select('id')
@@ -113,18 +133,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           if (!existingTrack) {
             const { data: newTrack, error: insertError } = await this.supabase
               .from('tracks')
-              .insert({
-                spotify_id: track.id,
-                album_id: album.id,
-                name: track.name,
-                duration_ms: track.duration_ms,
-                metadata: {
-                  source: 'spotify',
-                  disc_number: track.disc_number,
-                  track_number: track.track_number,
-                  discovery_timestamp: new Date().toISOString()
-                }
-              })
+              .insert(trackUpdateData)
               .select('id')
               .single();
 
@@ -136,8 +145,18 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
             trackId = newTrack.id;
             console.log(`Created new track record: ${track.name} (${track.id})`);
           } else {
+            const { error: updateError } = await this.supabase
+              .from('tracks')
+              .update(trackUpdateData)
+              .eq('id', existingTrack.id);
+
+            if (updateError) {
+              console.error('Error updating track:', updateError);
+              throw updateError;
+            }
+
             trackId = existingTrack.id;
-            console.log(`Found existing track: ${track.name} (${track.id})`);
+            console.log(`Updated existing track: ${track.name} (${track.id})`);
           }
           
           // Handle normalized track entry - use the artist UUID from our database, not the Spotify ID
