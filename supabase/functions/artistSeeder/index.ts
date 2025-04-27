@@ -2,7 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
-import { ensureToken, getSpotifyArtistId } from "../lib/spotifyClient.ts";
+import { getSpotifyArtistId, spotifyApi } from "../lib/spotifyClient.ts";
 import { CircuitBreakerRegistry } from "../lib/circuitBreaker.ts";
 import { globalCache } from "../lib/cache.ts";
 
@@ -104,50 +104,37 @@ async function searchArtists(market: string, genre: string, config: SeederConfig
     
     return await globalCache.getOrFetch(cacheKey, async () => {
       console.log(`Searching for artists in market ${market} with genre ${genre}`);
-      const response = await fetch(
-        `https://api.spotify.com/v1/search?q=${encodeURIComponent(searchQuery)}&type=artist&market=${market}&limit=50`,
-        {
-          headers: {
-            'Authorization': `Bearer ${await ensureToken()}`
-          }
+      
+      try {
+        const data = await spotifyApi(`search?q=${encodeURIComponent(searchQuery)}&type=artist&market=${market}&limit=50`);
+        
+        if (!data.artists || !data.artists.items) {
+          console.log(`No artists found for market ${market} and genre ${genre}`);
+          return [];
         }
-      );
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        if (response.status === 429) {
-          const retryAfter = response.headers.get('Retry-After') || '60';
-          console.warn(`Rate limited by Spotify, retry after ${retryAfter}s`);
-          throw new Error(`Spotify rate limit reached. Retry after ${retryAfter}s`);
-        }
-        throw new Error(`Spotify API error: ${response.status} ${response.statusText}. Details: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      if (!data.artists || !data.artists.items) {
-        console.log(`No artists found for market ${market} and genre ${genre}`);
-        return [];
-      }
-      
-      // Filter artists according to criteria
-      const filteredArtists = data.artists.items.filter((artist: any) => {
-        // Filter by popularity
-        if (artist.popularity < config.minPopularity) return false;
+        
+        // Filter artists according to criteria
+        const filteredArtists = data.artists.items.filter((artist: any) => {
+          // Filter by popularity
+          if (artist.popularity < config.minPopularity) return false;
 
-        // Filter by excluded artists
-        if (config.excludeArtists?.includes(artist.id)) return false;
+          // Filter by excluded artists
+          if (config.excludeArtists?.includes(artist.id)) return false;
 
-        // Ensure artist has at least one matching genre
-        return artist.genres.some((g: string) => 
-          config.genres.some(configGenre => 
-            g.toLowerCase().includes(configGenre.toLowerCase())
-          )
-        );
-      });
-      
-      console.log(`Found ${filteredArtists.length} matching artists for ${market}/${genre}`);
-      return filteredArtists;
+          // Ensure artist has at least one matching genre
+          return artist.genres.some((g: string) => 
+            config.genres.some(configGenre => 
+              g.toLowerCase().includes(configGenre.toLowerCase())
+            )
+          );
+        });
+        
+        console.log(`Found ${filteredArtists.length} matching artists for ${market}/${genre}`);
+        return filteredArtists;
+      } catch (error) {
+        console.error(`Error searching artists: ${error}`);
+        throw error;
+      }
     }, 3600000); // Cache for 1 hour
   });
 }
