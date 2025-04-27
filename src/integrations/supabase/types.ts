@@ -528,6 +528,27 @@ export type Database = {
           },
         ]
       }
+      validation_reports: {
+        Row: {
+          created_at: string
+          id: string
+          results: Json
+          summary: Json
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          results: Json
+          summary: Json
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          results?: Json
+          summary?: Json
+        }
+        Relationships: []
+      }
       worker_issues: {
         Row: {
           created_at: string
@@ -666,6 +687,39 @@ export type Database = {
           details: Json
         }[]
       }
+      get_duplicate_tracks: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          album_id: string
+          album_name: string
+          track_name: string
+          count: number
+        }[]
+      }
+      get_orphaned_albums: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          album_id: string
+          album_name: string
+        }[]
+      }
+      get_orphaned_tracks: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          track_id: string
+          track_name: string
+        }[]
+      }
+      get_producer_attribution_by_artist: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          artist_id: string
+          artist_name: string
+          total_tracks: number
+          tracks_with_producers: number
+          percentage: number
+        }[]
+      }
       get_queue_metrics: {
         Args: Record<PropertyKey, never>
         Returns: {
@@ -673,6 +727,15 @@ export type Database = {
           pending_messages: number
           max_retries: number
           oldest_message_age: unknown
+        }[]
+      }
+      get_tracks_without_producers: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          track_id: string
+          track_name: string
+          album_name: string
+          artist_name: string
         }[]
       }
       is_worker_paused: {
