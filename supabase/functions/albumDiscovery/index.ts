@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getArtistAlbums, wait } from "../lib/spotifyClient.ts";
@@ -73,31 +72,27 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             throw selectError;
           }
 
-          if (!existingAlbum) {
-            const { error: insertError } = await this.supabase
-              .from('albums')
-              .insert({
-                spotify_id: album.id,
-                artist_id: artist.id,
-                name: album.name,
-                release_date: formattedReleaseDate,
-                metadata: {
-                  source: 'spotify',
-                  type: album.album_type,
-                  total_tracks: album.total_tracks,
-                  discovery_timestamp: new Date().toISOString()
-                }
-              });
+          const { error: upsertError } = await this.supabase
+            .from('albums')
+            .upsert({
+              spotify_id: album.id,
+              artist_id: artist.id,
+              name: album.name,
+              release_date: formattedReleaseDate,
+              metadata: {
+                source: 'spotify',
+                type: album.album_type,
+                total_tracks: album.total_tracks,
+                discovery_timestamp: new Date().toISOString()
+              }
+            });
 
-            if (insertError) {
-              console.error(`Error inserting album ${album.name}:`, insertError);
-              throw insertError;
-            }
-            
-            console.log(`Created new album record: ${album.name} (${album.id})`);
-          } else {
-            console.log(`Album ${album.name} already exists, skipping insert`);
+          if (upsertError) {
+            console.error(`Error upserting album ${album.name}:`, upsertError);
+            throw upsertError;
           }
+          
+          console.log(`Upserted album record: ${album.name} (${album.id})`);
           
           await this.enqueue('track_discovery', {
             albumId: album.id,
@@ -129,12 +124,10 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
     }
   }
 
-  // New method to reset the album discovery queue
   async resetQueue(): Promise<void> {
     try {
       console.log("Resetting album_discovery queue...");
       
-      // Execute the queue reset SQL directly using supabase
       await this.supabase.rpc("pgmq_drop_and_recreate_queue", { queue_name: "album_discovery" });
       
       console.log("Successfully reset album_discovery queue");
@@ -156,7 +149,6 @@ serve(async (req: Request) => {
   try {
     console.log('Album Discovery worker received request');
     
-    // Handle reset command if specified in request
     if (req.method === 'POST') {
       const body = await req.json().catch(() => ({}));
       
