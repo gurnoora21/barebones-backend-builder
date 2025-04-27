@@ -1,3 +1,4 @@
+
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 let spotifyAccessToken: string | null = null;
 let spotifyTokenExpiry = 0;
@@ -56,7 +57,7 @@ async function ensureToken(): Promise<string> {
 }
 
 /** Call Spotify API with the proper token and retry logic */
-async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
+export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
   // Create a unique cache key for this request
   const cacheKey = `spotify-api:${path}`;
   
