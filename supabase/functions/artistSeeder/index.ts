@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
@@ -34,7 +33,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Initialize a Supabase client
 function initSupabaseClient() {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const supabaseServiceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -48,9 +46,6 @@ function initSupabaseClient() {
   });
 }
 
-/**
- * Initialize a new seeding job and return its ID
- */
 async function initializeJob(supabase: any, config: SeederConfig): Promise<string> {
   try {
     const { data, error } = await supabase
@@ -85,11 +80,7 @@ async function initializeJob(supabase: any, config: SeederConfig): Promise<strin
   }
 }
 
-/**
- * Search for artists matching the given criteria
- */
 async function searchArtists(market: string, genre: string, config: SeederConfig): Promise<any[]> {
-  // Create circuit breaker for Spotify API calls
   const circuit = CircuitBreakerRegistry.getOrCreate({
     name: `spotify-search-${market}-${genre}`,
     failureThreshold: 3,
@@ -99,7 +90,6 @@ async function searchArtists(market: string, genre: string, config: SeederConfig
   return await circuit.fire(async () => {
     const searchQuery = `genre:${genre}`;
     
-    // Use cache to avoid repeated identical searches
     const cacheKey = `artist-search:${market}:${genre}:${config.minPopularity}`;
     
     return await globalCache.getOrFetch(cacheKey, async () => {
@@ -113,15 +103,9 @@ async function searchArtists(market: string, genre: string, config: SeederConfig
           return [];
         }
         
-        // Filter artists according to criteria
         const filteredArtists = data.artists.items.filter((artist: any) => {
-          // Filter by popularity
           if (artist.popularity < config.minPopularity) return false;
-
-          // Filter by excluded artists
           if (config.excludeArtists?.includes(artist.id)) return false;
-
-          // Ensure artist has at least one matching genre
           return artist.genres.some((g: string) => 
             config.genres.some(configGenre => 
               g.toLowerCase().includes(configGenre.toLowerCase())
@@ -139,9 +123,6 @@ async function searchArtists(market: string, genre: string, config: SeederConfig
   });
 }
 
-/**
- * Process a specific market-genre combination
- */
 async function processMarketGenreCombination(
   supabase: any,
   jobId: string,
@@ -163,7 +144,6 @@ async function processMarketGenreCombination(
           return processedCount;
         }
         
-        // Check if we've already processed this artist
         const { data: existing } = await supabase
           .from('seeding_artists')
           .select('spotify_id')
@@ -176,38 +156,27 @@ async function processMarketGenreCombination(
           continue;
         }
 
-        // Throttle requests to avoid overwhelming the database
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Insert into artists table
-        await supabase.from('artists').upsert({
-          name: artist.name,
-          spotify_id: artist.id,
-          popularity: artist.popularity,
-          market,
-          genres: artist.genres,
-          metadata: {
-            followers: artist.followers?.total,
-            images: artist.images,
-            external_urls: artist.external_urls
-          }
-        });
-
-        // Record the successful processing
-        await supabase.from('seeding_artists').insert({
-          job_id: jobId,
-          spotify_id: artist.id,
-          success: true,
-          details: { market, genre }
-        });
-
-        // Queue artist for album discovery with exponential backoff
         const retryCount = 3;
+        let queueSuccess = false;
+        
         for (let attempt = 0; attempt < retryCount; attempt++) {
           try {
             await supabase.functions.invoke('artistDiscovery', {
-              body: { artistId: artist.id }
+              body: { 
+                artistId: artist.id,
+                metadata: {
+                  source: 'seeder',
+                  market,
+                  genre,
+                  followers: artist.followers?.total,
+                  popularity: artist.popularity,
+                  genres: artist.genres,
+                  images: artist.images,
+                  external_urls: artist.external_urls
+                }
+              }
             });
+            queueSuccess = true;
             break;
           } catch (invokeError) {
             console.error(`Error invoking artistDiscovery (attempt ${attempt + 1}/${retryCount}):`, invokeError);
@@ -215,13 +184,26 @@ async function processMarketGenreCombination(
             await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
           }
         }
+
+        if (queueSuccess) {
+          await supabase.from('seeding_artists').insert({
+            job_id: jobId,
+            spotify_id: artist.id,
+            success: true,
+            details: { 
+              market, 
+              genre,
+              name: artist.name,
+              queued_at: new Date().toISOString()
+            }
+          });
+
+          processedCount++;
+          jobProgress.artist_count++;
+          
+          console.log(`Queued artist for discovery: ${artist.name} (${artist.id}), total count: ${jobProgress.artist_count}`);
+        }
         
-        processedCount++;
-        jobProgress.artist_count++;
-        
-        console.log(`Processed artist: ${artist.name} (${artist.id}), total count: ${jobProgress.artist_count}`);
-        
-        // Update job progress every 5 artists
         if (processedCount % 5 === 0) {
           await updateJobProgress(supabase, jobId, jobProgress);
         }
@@ -229,7 +211,6 @@ async function processMarketGenreCombination(
       } catch (error) {
         console.error(`Error processing artist ${artist.id}:`, error);
         
-        // Track error in job progress
         jobProgress.errors = jobProgress.errors || { count: 0 };
         jobProgress.errors.count = (jobProgress.errors.count || 0) + 1;
         jobProgress.errors.last_error = String(error);
@@ -255,9 +236,6 @@ async function processMarketGenreCombination(
   }
 }
 
-/**
- * Update the job progress in the database
- */
 async function updateJobProgress(supabase: any, jobId: string, progress: JobProgress): Promise<void> {
   try {
     progress.last_processed = new Date().toISOString();
@@ -277,9 +255,6 @@ async function updateJobProgress(supabase: any, jobId: string, progress: JobProg
   }
 }
 
-/**
- * Mark a job as completed
- */
 async function completeJob(supabase: any, jobId: string, jobProgress: JobProgress): Promise<void> {
   try {
     jobProgress.last_processed = new Date().toISOString();
@@ -308,11 +283,7 @@ async function completeJob(supabase: any, jobId: string, jobProgress: JobProgres
   }
 }
 
-/**
- * Main handler for the edge function
- */
 serve(async (req) => {
-  // Handle CORS preflight request
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -321,10 +292,8 @@ serve(async (req) => {
     const startTime = Date.now();
     const supabase = initSupabaseClient();
     
-    // Parse the request body for configuration
     const config: SeederConfig = await req.json();
     
-    // Basic validation
     if (!config.markets?.length || !config.genres?.length) {
       throw new Error('Markets and genres arrays are required and must not be empty');
     }
@@ -333,34 +302,27 @@ serve(async (req) => {
       throw new Error('minPopularity and maxArtists are required');
     }
     
-    // Apply sensible defaults
     config.excludeArtists = config.excludeArtists || [];
     
-    // Initialize the seeding job
     const jobId = await initializeJob(supabase, config);
     console.log(`Started seeding job ${jobId}`);
     
-    // Initialize progress tracking
     const jobProgress: JobProgress = {
       processed_markets: [],
       processed_genres: [],
       artist_count: 0
     };
     
-    // Process each market-genre combination
     for (const market of config.markets) {
-      // Track market progress
       if (!jobProgress.processed_markets.includes(market)) {
         jobProgress.processed_markets.push(market);
       }
       
       for (const genre of config.genres) {
-        // Track genre progress
         if (!jobProgress.processed_genres.includes(genre)) {
           jobProgress.processed_genres.push(genre);
         }
         
-        // Process this combination
         await processMarketGenreCombination(
           supabase, 
           jobId, 
@@ -370,10 +332,8 @@ serve(async (req) => {
           jobProgress
         );
         
-        // Update job progress
         await updateJobProgress(supabase, jobId, jobProgress);
         
-        // Check if we've reached the maximum artists
         if (jobProgress.artist_count >= config.maxArtists) {
           console.log(`Reached maximum artists count (${config.maxArtists})`);
           await completeJob(supabase, jobId, jobProgress);
@@ -399,7 +359,6 @@ serve(async (req) => {
       }
     }
     
-    // Mark job as completed
     await completeJob(supabase, jobId, jobProgress);
     
     return new Response(
