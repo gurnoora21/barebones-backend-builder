@@ -2,8 +2,8 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from 'sonner';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import ArtistDiscovery from "./pages/ArtistDiscovery";
-import NotFound from "./pages/NotFound";
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+import { Routes as AppRoutes } from './routes';
 import "./App.css";
 
 // Create a client
@@ -11,7 +11,8 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: false,
+      staleTime: 1000 * 60 * 5, // 5 minutes
+      retry: 1,
     },
   },
 });
@@ -19,13 +20,9 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Toaster position="top-center" />
-        <Routes>
-          <Route path="/" element={<ArtistDiscovery />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
+      <Toaster position="top-center" />
+      <AppRoutes />
+      <ReactQueryDevtools initialIsOpen={false} />
     </QueryClientProvider>
   );
 }
