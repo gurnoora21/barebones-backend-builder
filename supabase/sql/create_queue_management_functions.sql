@@ -1,4 +1,3 @@
-
 -- Function to safely drop and recreate a PGMQ queue
 CREATE OR REPLACE FUNCTION pgmq_drop_and_recreate_queue(queue_name TEXT)
 RETURNS VOID
