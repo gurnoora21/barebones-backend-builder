@@ -65,29 +65,31 @@ export default function HomePage() {
           </Tabs>
         </div>
         
-        <TabsContent value="trending" className="mt-0">
-          {trendingProducersQuery.isLoading ? (
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Array(pageSize).fill(0).map((_, i) => (
-                <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
-              ))}
-            </div>
-          ) : (
-            <ProducerGrid producers={(trendingProducersQuery.data?.data || []) as Producers[]} />
-          )}
-        </TabsContent>
-        
-        <TabsContent value="hidden" className="mt-0">
-          {hiddenGemsQuery.isLoading ? (
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Array(pageSize).fill(0).map((_, i) => (
-                <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
-              ))}
-            </div>
-          ) : (
-            <ProducerGrid producers={(hiddenGemsQuery.data?.data || []) as Producers[]} />
-          )}
-        </TabsContent>
+        <Tabs value={currentTab} className="mt-0">
+          <TabsContent value="trending">
+            {trendingProducersQuery.isLoading ? (
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {Array(pageSize).fill(0).map((_, i) => (
+                  <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <ProducerGrid producers={(trendingProducersQuery.data?.data || []) as Producers[]} />
+            )}
+          </TabsContent>
+          
+          <TabsContent value="hidden">
+            {hiddenGemsQuery.isLoading ? (
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {Array(pageSize).fill(0).map((_, i) => (
+                  <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <ProducerGrid producers={(hiddenGemsQuery.data?.data || []) as Producers[]} />
+            )}
+          </TabsContent>
+        </Tabs>
         
         <div className="mt-8 flex justify-center">
           <Button 
