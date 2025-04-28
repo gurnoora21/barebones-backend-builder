@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useStats } from '@/hooks/useStats';
 import { useQuery } from '@tanstack/react-query';
 import { fetchList, Producers } from '@/lib/supabase';
@@ -41,6 +41,24 @@ export default function HomePage() {
   
   const statsQuery = useStats();
   
+  // Debug producer data
+  useEffect(() => {
+    if (trendingProducersQuery.data) {
+      console.log('Trending Producers Data:', trendingProducersQuery.data);
+      console.log('Producers count:', trendingProducersQuery.data?.data?.length || 0);
+    }
+    if (hiddenGemsQuery.data) {
+      console.log('Hidden Gems Data:', hiddenGemsQuery.data);
+      console.log('Hidden gems count:', hiddenGemsQuery.data?.data?.length || 0);
+    }
+    if (trendingProducersQuery.error) {
+      console.error('Trending Producers Error:', trendingProducersQuery.error);
+    }
+    if (hiddenGemsQuery.error) {
+      console.error('Hidden Gems Error:', hiddenGemsQuery.error);
+    }
+  }, [trendingProducersQuery.data, hiddenGemsQuery.data, trendingProducersQuery.error, hiddenGemsQuery.error]);
+  
   return (
     <div className="space-y-12">
       <section className="text-center px-4">
@@ -73,8 +91,18 @@ export default function HomePage() {
                   <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
                 ))}
               </div>
+            ) : trendingProducersQuery.error ? (
+              <div className="text-center py-8 text-red-500">
+                Error loading producers: {(trendingProducersQuery.error as Error)?.message || 'Unknown error'}
+              </div>
+            ) : !trendingProducersQuery.data?.data?.length ? (
+              <div className="text-center py-8">
+                No producers found. Try adjusting your filters.
+              </div>
             ) : (
-              <ProducerGrid producers={(trendingProducersQuery.data?.data || []) as Producers[]} />
+              <ProducerGrid 
+                producers={(trendingProducersQuery.data?.data || []) as Producers[]} 
+              />
             )}
           </TabsContent>
           
@@ -85,8 +113,18 @@ export default function HomePage() {
                   <div key={i} className="h-48 bg-muted rounded-lg animate-pulse" />
                 ))}
               </div>
+            ) : hiddenGemsQuery.error ? (
+              <div className="text-center py-8 text-red-500">
+                Error loading producers: {(hiddenGemsQuery.error as Error)?.message || 'Unknown error'}
+              </div>
+            ) : !hiddenGemsQuery.data?.data?.length ? (
+              <div className="text-center py-8">
+                No hidden gems found. Try adjusting your filters.
+              </div>
             ) : (
-              <ProducerGrid producers={(hiddenGemsQuery.data?.data || []) as Producers[]} />
+              <ProducerGrid 
+                producers={(hiddenGemsQuery.data?.data || []) as Producers[]}
+              />
             )}
           </TabsContent>
         </Tabs>

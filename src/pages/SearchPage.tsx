@@ -59,6 +59,14 @@ export default function SearchPage() {
   };
   
   const filteredResults = getFilteredResults();
+
+  // Debug search results
+  useEffect(() => {
+    if (searchResults) {
+      console.log('Search results:', searchResults);
+      console.log('Filtered results:', filteredResults);
+    }
+  }, [searchResults, filteredResults]);
   
   return (
     <div className="space-y-8">
@@ -135,6 +143,11 @@ export default function SearchPage() {
                       producers={filteredResults} 
                       isLoading={isLoading} 
                     />
+                    {filteredResults.length > 0 && (
+                      <div className="mt-4 text-center text-sm text-muted-foreground">
+                        Found {filteredResults.length} producer(s) for "{searchQuery}"
+                      </div>
+                    )}
                   </div>
                 )}
               </TabsContent>
@@ -145,7 +158,14 @@ export default function SearchPage() {
                     <div className="animate-spin h-6 w-6 border-2 border-primary border-t-transparent rounded-full inline-block"></div>
                   </div>
                 ) : (
-                  <ArtistGrid artists={filteredResults} />
+                  <>
+                    <ArtistGrid artists={filteredResults} />
+                    {filteredResults.length > 0 && (
+                      <div className="mt-4 text-center text-sm text-muted-foreground">
+                        Found {filteredResults.length} artist(s) for "{searchQuery}"
+                      </div>
+                    )}
+                  </>
                 )}
               </TabsContent>
             </>

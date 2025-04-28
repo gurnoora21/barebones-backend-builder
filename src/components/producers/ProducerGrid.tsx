@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { UserAvatar } from '@/components/common/UserAvatar';
+import { useEffect } from 'react';
 
 interface Producer {
   id: string;
@@ -10,6 +11,7 @@ interface Producer {
   instagram_handle?: string | null;
   metadata?: any;
   trackCount?: number;
+  popularity?: number;
 }
 
 interface ProducerGridProps {
@@ -18,6 +20,14 @@ interface ProducerGridProps {
 }
 
 export function ProducerGrid({ producers, isLoading = false }: ProducerGridProps) {
+  // Debug producers
+  useEffect(() => {
+    console.log('ProducerGrid received producers:', producers);
+    if (producers.length > 0) {
+      console.log('Sample producer:', producers[0]);
+    }
+  }, [producers]);
+
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -28,7 +38,7 @@ export function ProducerGrid({ producers, isLoading = false }: ProducerGridProps
     );
   }
   
-  if (!producers.length) {
+  if (!producers || !producers.length) {
     return (
       <div className="text-center py-8">
         <p className="text-muted-foreground">No producers found</p>
@@ -46,10 +56,15 @@ export function ProducerGrid({ producers, isLoading = false }: ProducerGridProps
 }
 
 function ProducerCard({ producer }: { producer: Producer }) {
-  const { id, name, instagram_handle, trackCount } = producer;
+  const { id, name, instagram_handle, trackCount, popularity } = producer;
   
   // Extract image from metadata if available
   const imageUrl = producer.metadata?.image_url || null;
+  
+  // Debug individual producer
+  useEffect(() => {
+    console.log('Rendering producer card:', { id, name, imageUrl, instagram_handle });
+  }, [id, name, imageUrl, instagram_handle]);
   
   return (
     <Link to={`/producer/${id}`}>
@@ -64,10 +79,15 @@ function ProducerCard({ producer }: { producer: Producer }) {
           </div>
         </div>
         <CardContent className="pt-4">
-          <h3 className="font-semibold truncate">{name}</h3>
+          <h3 className="font-semibold truncate">{name || 'Unknown Producer'}</h3>
           {instagram_handle && (
             <p className="text-sm text-muted-foreground truncate">
               @{instagram_handle}
+            </p>
+          )}
+          {popularity !== undefined && (
+            <p className="text-xs text-muted-foreground mt-1">
+              Popularity: {popularity}
             </p>
           )}
         </CardContent>
