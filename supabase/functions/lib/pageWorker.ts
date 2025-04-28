@@ -2,6 +2,7 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 import { Database } from '../types.ts';
 import { globalCache } from './cache.ts';
 import { CircuitBreakerRegistry, CircuitState } from './circuitBreaker.ts';
+import { BatchProcessor, BatchStats } from './batchProcessor.ts';
 
 // Enhanced error categorization
 export enum ErrorCategory {
@@ -55,6 +56,7 @@ export abstract class PageWorker<Msg> {
   protected traceContext?: TraceContext;
   private _workerId: string | undefined;
   protected dlqOptions: DLQOptions;
+  private batchProcessor: BatchProcessor<Msg>;
 
   constructor(queueName: string, vtSeconds = 60, dlqOptions?: Partial<DLQOptions>) {
     this.queueName = queueName;
@@ -73,9 +75,27 @@ export abstract class PageWorker<Msg> {
       Deno.env.get('SUPABASE_URL') || '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
     );
+    
+    this.batchProcessor = new BatchProcessor(this.supabase, {
+      concurrency: 3,
+      batchSize: 10
+    });
   }
 
-  // Read exactly one message from the queue
+  // New method for batch processing
+  async readBatch(): Promise<BatchStats> {
+    console.log(`Reading batch of messages from queue: ${this.queueName}`);
+    
+    return this.batchProcessor.processBatch(
+      this.queueName,
+      async (messages) => {
+        await Promise.all(messages.map(msg => this.process(msg)));
+      },
+      this.vtSeconds
+    );
+  }
+
+  // Original readOne method remains for compatibility
   async readOne(): Promise<{ msgId: number; msg: Msg; readCt: number; traceContext?: TraceContext } | null> {
     console.log(`Reading one message from queue: ${this.queueName}`);
     
@@ -145,6 +165,106 @@ export abstract class PageWorker<Msg> {
       }
       
       throw categorizedError;
+    }
+  }
+
+  // Update run method to support both single and batch processing
+  async run(useBatch = true): Promise<void> {
+    console.log(`Running page-worker for queue: ${this.queueName} (batch mode: ${useBatch})`);
+    this.startTime = Date.now();
+    
+    if (useBatch) {
+      const stats = await this.readBatch();
+      console.log(`Batch processing complete for ${this.queueName}:`, stats);
+    } else {
+      const message = await this.readOne();
+      if (!message) {
+        console.log(`No message to process for queue: ${this.queueName}`);
+        return;
+      }
+      
+      const { msgId, msg, readCt, traceContext } = message;
+    
+      // Initialize or propagate trace context
+      this.traceContext = traceContext || {
+        traceId: this.generateTraceId(),
+        spanId: this.generateSpanId(),
+        serviceName: this.queueName,
+        operationName: 'process',
+        timestamp: Date.now(),
+        attributes: {
+          workerId: this.getWorkerId(),
+          msgId: String(msgId),
+          readCt: String(readCt)
+        }
+      };
+      
+      console.log(`[Trace:${this.traceContext.traceId}] Processing message ${msgId} from queue ${this.queueName}`);
+      
+      try {
+        // Use circuit breaker pattern for processing
+        const circuitBreaker = CircuitBreakerRegistry.getOrCreate({
+          name: `queue-${this.queueName}`,
+          failureThreshold: 5,
+          resetTimeoutMs: 60000 // 1 minute
+        });
+        
+        await circuitBreaker.fire(async () => {
+          await this.traceOperation('process', async () => {
+            // Apply timeout to processing
+            const timeout = 30000; // 30 second timeout
+            const processPromise = this.process(msg);
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
+            });
+            
+            await Promise.race([processPromise, timeoutPromise]);
+          });
+        });
+        
+        await this.ack(msgId);
+      } catch (err) {
+        console.error(`[Trace:${this.traceContext.traceId}] Error processing msg ${msgId} on ${this.queueName}:`, err);
+        
+        const error = this.categorizeError(err);
+        
+        // If too many retries or non-retryable error, move to dead-letter
+        if (readCt >= this.dlqOptions.maxRetries || !error.retryable) {
+          await this.moveToDeadLetter(msgId, msg, readCt + 1, error);
+        } else {
+          // Check if this error category should be auto-retried based on custom logic
+          const shouldAutoRetry = this.dlqOptions.categorizeForAutoRetry ? 
+            this.dlqOptions.categorizeForAutoRetry(error) :
+            this.shouldRetryError(error);
+            
+          if (shouldAutoRetry) {
+            // Calculate exponential backoff
+            const delayMs = this.dlqOptions.retryDelayBaseMs * Math.pow(2, Math.min(readCt, 8));
+            console.log(`Scheduling retry for message ${msgId} with backoff delay ${delayMs}ms`);
+            
+            // We could implement a delayed retry here if the queue supports it
+            // For now, we just log and let the VT expire
+            await this.logError(msgId, {
+              ...error,
+              context: {
+                ...(error.context || {}),
+                retry_count: readCt,
+                next_retry_delay_ms: delayMs
+              }
+            });
+          } else {
+            // Not eligible for auto-retry, move to dead letter
+            await this.moveToDeadLetter(msgId, msg, readCt + 1, {
+              ...error,
+              context: {
+                ...(error.context || {}),
+                retry_ineligible: true,
+                retry_count: readCt
+              }
+            });
+          }
+        }
+      }
     }
   }
 
@@ -421,101 +541,6 @@ export abstract class PageWorker<Msg> {
     } catch (error) {
       // Don't fail if we can't record the trace
       console.error("Failed to record trace:", error);
-    }
-  }
-
-  // Main runner method with improved error handling and retry logic
-  async run(): Promise<void> {
-    console.log(`Running page-worker for queue: ${this.queueName}`);
-    this.startTime = Date.now();
-    
-    const message = await this.readOne();
-    if (!message) {
-      console.log(`No message to process for queue: ${this.queueName}`);
-      return;
-    }
-    
-    const { msgId, msg, readCt, traceContext } = message;
-    
-    // Initialize or propagate trace context
-    this.traceContext = traceContext || {
-      traceId: this.generateTraceId(),
-      spanId: this.generateSpanId(),
-      serviceName: this.queueName,
-      operationName: 'process',
-      timestamp: Date.now(),
-      attributes: {
-        workerId: this.getWorkerId(),
-        msgId: String(msgId),
-        readCt: String(readCt)
-      }
-    };
-    
-    console.log(`[Trace:${this.traceContext.traceId}] Processing message ${msgId} from queue ${this.queueName}`);
-    
-    try {
-      // Use circuit breaker pattern for processing
-      const circuitBreaker = CircuitBreakerRegistry.getOrCreate({
-        name: `queue-${this.queueName}`,
-        failureThreshold: 5,
-        resetTimeoutMs: 60000 // 1 minute
-      });
-      
-      await circuitBreaker.fire(async () => {
-        await this.traceOperation('process', async () => {
-          // Apply timeout to processing
-          const timeout = 30000; // 30 second timeout
-          const processPromise = this.process(msg);
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error(`Processing timed out after ${timeout}ms`)), timeout);
-          });
-          
-          await Promise.race([processPromise, timeoutPromise]);
-        });
-      });
-      
-      await this.ack(msgId);
-    } catch (err) {
-      console.error(`[Trace:${this.traceContext.traceId}] Error processing msg ${msgId} on ${this.queueName}:`, err);
-      
-      const error = this.categorizeError(err);
-      
-      // If too many retries or non-retryable error, move to dead-letter
-      if (readCt >= this.dlqOptions.maxRetries || !error.retryable) {
-        await this.moveToDeadLetter(msgId, msg, readCt + 1, error);
-      } else {
-        // Check if this error category should be auto-retried based on custom logic
-        const shouldAutoRetry = this.dlqOptions.categorizeForAutoRetry ? 
-          this.dlqOptions.categorizeForAutoRetry(error) :
-          this.shouldRetryError(error);
-          
-        if (shouldAutoRetry) {
-          // Calculate exponential backoff
-          const delayMs = this.dlqOptions.retryDelayBaseMs * Math.pow(2, Math.min(readCt, 8));
-          console.log(`Scheduling retry for message ${msgId} with backoff delay ${delayMs}ms`);
-          
-          // We could implement a delayed retry here if the queue supports it
-          // For now, we just log and let the VT expire
-          await this.logError(msgId, {
-            ...error,
-            context: {
-              ...(error.context || {}),
-              retry_count: readCt,
-              next_retry_delay_ms: delayMs
-            }
-          });
-        } else {
-          // Not eligible for auto-retry, move to dead letter
-          await this.moveToDeadLetter(msgId, msg, readCt + 1, {
-            ...error,
-            context: {
-              ...(error.context || {}),
-              retry_ineligible: true,
-              retry_count: readCt
-            }
-          });
-        }
-      }
     }
   }
 
