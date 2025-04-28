@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useStats } from '@/hooks/useStats';
 import { useQuery } from '@tanstack/react-query';
-import { fetchList } from '@/lib/supabase';
+import { fetchList, Producers } from '@/lib/supabase';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProducerGrid } from '@/components/producers/ProducerGrid';
 import { ArtistGrid } from '@/components/artists/ArtistGrid';
@@ -20,24 +20,22 @@ export default function HomePage() {
   // Fetch trending producers (those with most track credits)
   const trendingProducersQuery = useQuery({
     queryKey: ['trendingProducers', page, pageSize],
-    queryFn: () => fetchList('producers', {
+    queryFn: () => fetchList<Producers>('producers', {
       page,
       pageSize,
       orderBy: { column: 'popularity', ascending: false },
-    }),
-    keepPreviousData: true,
+    })
   });
   
   // Fetch "hidden gems" producers (those with high quality but fewer credits)
   const hiddenGemsQuery = useQuery({
     queryKey: ['hiddenGems', page, pageSize],
-    queryFn: () => fetchList('producers', {
+    queryFn: () => fetchList<Producers>('producers', {
       page,
       pageSize,
       filters: { popularity: 'low' },
       orderBy: { column: 'popularity', ascending: true },
     }),
-    keepPreviousData: true,
     enabled: currentTab === 'hidden',
   });
   
@@ -75,7 +73,7 @@ export default function HomePage() {
               ))}
             </div>
           ) : (
-            <ProducerGrid producers={trendingProducersQuery.data?.data || []} />
+            <ProducerGrid producers={(trendingProducersQuery.data?.data || []) as Producers[]} />
           )}
         </TabsContent>
         
@@ -87,7 +85,7 @@ export default function HomePage() {
               ))}
             </div>
           ) : (
-            <ProducerGrid producers={hiddenGemsQuery.data?.data || []} />
+            <ProducerGrid producers={(hiddenGemsQuery.data?.data || []) as Producers[]} />
           )}
         </TabsContent>
         

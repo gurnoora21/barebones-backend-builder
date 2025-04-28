@@ -2,7 +2,7 @@
 import { useParams } from 'react-router-dom';
 import { useArtist, useArtistProducers } from '@/hooks/useArtist';
 import { useQuery } from '@tanstack/react-query';
-import { fetchList } from '@/lib/supabase';
+import { fetchList, Albums, Tracks } from '@/lib/supabase';
 import { UserAvatar } from '@/components/common/UserAvatar';
 import { Instagram, Twitter, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,7 +22,7 @@ export default function ArtistPage() {
   // Fetch albums for the artist
   const { data: albumsData, isLoading: isLoadingAlbums } = useQuery({
     queryKey: ['artistAlbums', id],
-    queryFn: () => fetchList('albums', {
+    queryFn: () => fetchList<Albums>('albums', {
       filters: { artist_id: id },
       orderBy: { column: 'release_date', ascending: false }
     }),
@@ -38,7 +38,7 @@ export default function ArtistPage() {
       const albumIds = albumsData.data.map(album => album.id);
       const trackResults = await Promise.all(
         albumIds.map(async (albumId) => {
-          const { data, error } = await fetchList('tracks', {
+          const { data, error } = await fetchList<Tracks>('tracks', {
             filters: { album_id: albumId },
             orderBy: { column: 'name', ascending: true }
           });
@@ -70,13 +70,15 @@ export default function ArtistPage() {
         // there are too many track IDs to fit in a single query
       });
       
-      const trackProducerMap = {};
-      results.data?.forEach((tp: any) => {
-        if (!trackProducerMap[tp.track_id]) {
-          trackProducerMap[tp.track_id] = [];
-        }
-        trackProducerMap[tp.track_id].push(tp);
-      });
+      const trackProducerMap: Record<string, any[]> = {};
+      if (results.data) {
+        results.data.forEach((tp: any) => {
+          if (!trackProducerMap[tp.track_id]) {
+            trackProducerMap[tp.track_id] = [];
+          }
+          trackProducerMap[tp.track_id].push(tp);
+        });
+      }
       
       return trackProducerMap;
     },
@@ -88,10 +90,14 @@ export default function ArtistPage() {
   const producers = producersData?.data || [];
   
   // Organize tracks by album
-  const tracksByAlbum = {};
-  tracksData?.forEach(({ albumId, tracks }) => {
-    tracksByAlbum[albumId] = tracks;
-  });
+  const tracksByAlbum: Record<string, any[]> = {};
+  if (tracksData) {
+    tracksData.forEach(({ albumId, tracks }) => {
+      if (albumId) {
+        tracksByAlbum[albumId] = tracks;
+      }
+    });
+  }
   
   if (artistError) {
     return (
@@ -114,7 +120,7 @@ export default function ArtistPage() {
           <div className="flex flex-col md:flex-row items-center md:items-center gap-6">
             <UserAvatar 
               name={artist.name} 
-              imageUrl={artist.metadata?.image_url} 
+              imageUrl={artist.metadata && typeof artist.metadata === 'object' ? (artist.metadata as any).image_url : undefined} 
               size="lg"
               className="h-24 w-24"
             />
@@ -270,7 +276,7 @@ export default function ArtistPage() {
                           ) : (
                             <div className="space-y-2 pt-2">
                               <ul>
-                                {albumTracks.map((track: any) => (
+                                {albumTracks.map((track: Tracks) => (
                                   <li key={track.id} className="py-2 flex justify-between border-b last:border-b-0">
                                     <div>
                                       <p>{track.name}</p>

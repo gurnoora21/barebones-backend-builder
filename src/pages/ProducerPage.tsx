@@ -89,7 +89,7 @@ export default function ProducerPage() {
           <div className="flex flex-col md:flex-row items-start md:items-center gap-6">
             <UserAvatar 
               name={producer.name} 
-              imageUrl={producer.metadata?.image_url} 
+              imageUrl={producer.metadata && typeof producer.metadata === 'object' ? (producer.metadata as any).image_url : undefined} 
               size="lg"
               className="h-24 w-24"
             />

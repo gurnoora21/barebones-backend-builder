@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 import { PostgrestError } from "@supabase/supabase-js";
 
+// Define specific types for our data models
 export type Tables<T extends keyof Database['public']['Tables']> = Database['public']['Tables'][T]['Row'];
 export type Artists = Tables<'artists'>;
 export type Albums = Tables<'albums'>;
@@ -10,6 +11,7 @@ export type Tracks = Tables<'tracks'>;
 export type Producers = Tables<'producers'>;
 export type TrackProducers = Tables<'track_producers'>;
 
+// Define return types for our queries
 export type QueryResult<T> = {
   data: T | null;
   error: PostgrestError | null;
@@ -85,21 +87,21 @@ export async function searchAcross(
   const results: Record<string, any[]> = {};
 
   // Execute searches in parallel
-  await Promise.all(
-    tables.map(async (table) => {
-      const { data, error } = await supabase
-        .from(table as keyof Database['public']['Tables'])
-        .select('*')
-        .ilike('name', `%${query}%`)
-        .limit(limit);
+  const promises = tables.map(async (table) => {
+    const { data, error } = await supabase
+      .from(table as keyof Database['public']['Tables'])
+      .select('*')
+      .ilike('name', `%${query}%`)
+      .limit(limit);
 
-      if (!error && data) {
-        results[table] = data;
-      } else {
-        results[table] = [];
-      }
-    })
-  );
+    if (!error && data) {
+      results[table] = data;
+    } else {
+      results[table] = [];
+    }
+  });
+  
+  await Promise.all(promises);
 
   return results;
 }
@@ -202,7 +204,7 @@ export async function fetchArtistProducers(
   const start = (page - 1) * pageSize;
   const end = start + pageSize - 1;
 
-  const query = supabase
+  const { data, error } = await supabase
     .from('albums')
     .select(`
       tracks:id (
@@ -214,14 +216,12 @@ export async function fetchArtistProducers(
     `)
     .eq('artist_id', artistId)
     .range(start, end);
-
-  const { data, error } = await query;
   
   // Process data to extract producers with track counts
   const producerMap = new Map();
   
   if (data) {
-    data.forEach(album => {
+    data.forEach((album: any) => {
       if (album.tracks) {
         album.tracks.forEach((track: any) => {
           if (track.track_producers) {
@@ -278,12 +278,11 @@ export async function searchByName(
 ): Promise<QueryListResult<any>> {
   const { type = 'producers', limit = 10 } = options || {};
   
-  let dbQuery = supabase
+  const { data, error } = await supabase
     .from(type)
     .select('*')
     .ilike('name', `%${query}%`)
     .limit(limit);
 
-  const { data, error } = await dbQuery;
   return { data, error };
 }

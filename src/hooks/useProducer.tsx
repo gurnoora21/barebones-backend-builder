@@ -1,6 +1,6 @@
 
 import { useQuery } from '@tanstack/react-query';
-import { fetchProducer, fetchProducerTracks } from '@/lib/supabase';
+import { fetchProducer, fetchProducerTracks, QueryResult, Producers } from '@/lib/supabase';
 
 export function useProducer(id: string) {
   return useQuery({

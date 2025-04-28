@@ -8,7 +8,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProducerGrid } from '@/components/producers/ProducerGrid';
 import { ArtistGrid } from '@/components/artists/ArtistGrid';
 import { Search as SearchIcon } from 'lucide-react';
-import { useVirtualizer } from '@tanstack/react-virtual';
 
 export default function SearchPage() {
   const location = useLocation();
@@ -45,6 +44,21 @@ export default function SearchPage() {
     e.preventDefault();
     // URL is already updated via useEffect
   };
+  
+  // Extract artists and producers from results for specific tabs
+  const getFilteredResults = () => {
+    if (!searchResults?.data) return [];
+    
+    if (searchType === 'artists') {
+      return searchResults.data.filter((item: any) => item.followers !== undefined);
+    } else if (searchType === 'producers') {
+      return searchResults.data.filter((item: any) => item.normalized_name !== undefined);
+    }
+    
+    return searchResults.data;
+  };
+  
+  const filteredResults = getFilteredResults();
   
   return (
     <div className="space-y-8">
@@ -91,12 +105,16 @@ export default function SearchPage() {
                           <>
                             <section>
                               <h2 className="text-xl font-semibold mb-4">Producers</h2>
-                              <ProducerGrid producers={searchResults.data.filter((item: any) => item.normalized_name !== undefined)} />
+                              <ProducerGrid 
+                                producers={searchResults.data.filter((item: any) => item.normalized_name !== undefined)} 
+                              />
                             </section>
                             
                             <section>
                               <h2 className="text-xl font-semibold mb-4">Artists</h2>
-                              <ArtistGrid artists={searchResults.data.filter((item: any) => item.followers !== undefined)} />
+                              <ArtistGrid 
+                                artists={searchResults.data.filter((item: any) => item.followers !== undefined)} 
+                              />
                             </section>
                           </>
                         )}
@@ -114,7 +132,7 @@ export default function SearchPage() {
                 ) : (
                   <div>
                     <ProducerGrid 
-                      producers={searchResults?.data || []} 
+                      producers={filteredResults} 
                       isLoading={isLoading} 
                     />
                   </div>
@@ -127,7 +145,7 @@ export default function SearchPage() {
                     <div className="animate-spin h-6 w-6 border-2 border-primary border-t-transparent rounded-full inline-block"></div>
                   </div>
                 ) : (
-                  <ArtistGrid artists={searchResults?.data || []} />
+                  <ArtistGrid artists={filteredResults} />
                 )}
               </TabsContent>
             </>

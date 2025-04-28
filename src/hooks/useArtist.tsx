@@ -1,6 +1,6 @@
 
 import { useQuery } from '@tanstack/react-query';
-import { fetchArtist, fetchArtistProducers } from '@/lib/supabase';
+import { fetchArtist, fetchArtistProducers, QueryResult, Artists } from '@/lib/supabase';
 
 export function useArtist(id: string) {
   return useQuery({
