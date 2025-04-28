@@ -27,7 +27,7 @@ export function ArtistGrid() {
       pageSize,
       orderBy: { column: 'followers', ascending: false },
     }),
-    keepPreviousData: true,
+    placeholderData: (previousData) => previousData,
   });
   
   const artists = data?.data || [];

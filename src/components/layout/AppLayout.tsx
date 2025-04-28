@@ -3,10 +3,10 @@ import { Outlet } from 'react-router-dom';
 import { Suspense } from 'react';
 import { DesktopNav } from './DesktopNav';
 import { MobileNav } from './MobileNav';
-import { useMobile } from '@/hooks/use-mobile';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 export function AppLayout() {
-  const isMobile = useMobile();
+  const isMobile = useIsMobile();
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">

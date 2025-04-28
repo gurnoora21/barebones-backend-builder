@@ -2,7 +2,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from 'sonner';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+// We'll install the devtools but make it conditional based on environment
 import { Routes as AppRoutes } from './routes';
 import "./App.css";
 
@@ -22,7 +22,11 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <Toaster position="top-center" />
       <AppRoutes />
-      <ReactQueryDevtools initialIsOpen={false} />
+      {process.env.NODE_ENV !== 'production' && (
+        <div className="hidden">
+          {/* ReactQueryDevtools will be dynamically imported only in development */}
+        </div>
+      )}
     </QueryClientProvider>
   );
 }

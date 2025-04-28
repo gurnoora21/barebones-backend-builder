@@ -29,6 +29,6 @@ export function useProducerTracks(
     queryKey: ['producerTracks', producerId, page, pageSize, orderBy, filters],
     queryFn: () => fetchProducerTracks(producerId, { page, pageSize, orderBy, filters }),
     enabled: !!producerId,
-    keepPreviousData: true,
+    placeholderData: (previousData) => previousData,
   });
 }

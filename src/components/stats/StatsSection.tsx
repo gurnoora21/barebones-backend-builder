@@ -1,7 +1,6 @@
 
 import { useStats } from '@/hooks/useStats';
 import { useEffect, useState } from 'react';
-import CountUp from 'react-countup';
 import { Skeleton } from '@/components/ui/skeleton';
 
 export function StatsSection() {
@@ -46,6 +45,39 @@ interface StatCardProps {
 }
 
 function StatCard({ title, value, isLoading, isVisible }: StatCardProps) {
+  // We will implement a simple count-up animation without the library
+  const [displayValue, setDisplayValue] = useState(0);
+  
+  useEffect(() => {
+    if (!isVisible || isLoading) return;
+    
+    // Simple count-up animation
+    let start = 0;
+    const end = value;
+    const duration = 2000; // 2 seconds
+    const frameDuration = 1000 / 60; // 60fps
+    const totalFrames = Math.round(duration / frameDuration);
+    const increment = end / totalFrames;
+    
+    let currentFrame = 0;
+    const counter = setInterval(() => {
+      currentFrame++;
+      const progress = easeOutQuad(currentFrame / totalFrames);
+      const currentCount = Math.floor(progress * end);
+      
+      setDisplayValue(currentCount);
+      
+      if (currentFrame === totalFrames) {
+        clearInterval(counter);
+      }
+    }, frameDuration);
+    
+    return () => clearInterval(counter);
+  }, [value, isVisible, isLoading]);
+  
+  // Easing function for smoother animation
+  const easeOutQuad = (t: number) => t * (2 - t);
+  
   return (
     <div className="text-center">
       <h3 className="text-lg font-medium text-muted-foreground mb-2">{title}</h3>
@@ -53,12 +85,7 @@ function StatCard({ title, value, isLoading, isVisible }: StatCardProps) {
         {isLoading ? (
           <Skeleton className="h-12 w-24 mx-auto" />
         ) : isVisible ? (
-          <CountUp 
-            end={value} 
-            duration={2} 
-            separator="," 
-            useEasing={true}
-          />
+          displayValue.toLocaleString()
         ) : value.toLocaleString()}
       </div>
     </div>

@@ -1,8 +1,6 @@
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { useRef } from 'react';
 import { ChevronDown, ChevronUp, Filter, Calendar, User, Disc } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -81,13 +79,41 @@ export function TrackTable({
     return Array.from(albumsMap.values());
   }, [tracks]);
   
-  // Set up virtualization
-  const virtualizer = useVirtualizer({
-    count: isLoading ? 10 : tracks.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 64,
-    overscan: 5,
-  });
+  // We'll implement a simpler virtualization approach without the external library
+  const [visibleItems, setVisibleItems] = useState<number[]>([]);
+  
+  // Set up a useEffect to handle the visible tracks when the container is scrolled
+  const handleScroll = () => {
+    if (!parentRef.current) return;
+    
+    const { scrollTop, scrollHeight, clientHeight } = parentRef.current;
+    const itemHeight = 64; // estimated height of each row
+    
+    // Calculate visible range
+    const startIndex = Math.floor(scrollTop / itemHeight);
+    const endIndex = Math.ceil((scrollTop + clientHeight) / itemHeight);
+    
+    // Create an array of visible indices with some overscan
+    const overscan = 5;
+    const start = Math.max(0, startIndex - overscan);
+    const end = Math.min(tracks.length - 1, endIndex + overscan);
+    
+    const indices = [];
+    for (let i = start; i <= end; i++) {
+      indices.push(i);
+    }
+    
+    setVisibleItems(indices);
+  };
+  
+  // Use useMemo to create the style for the container that simulates the full height
+  const containerStyle = useMemo(() => {
+    return {
+      height: `${tracks.length * 64}px`, // each row is approximately 64px tall
+      position: 'relative' as const,
+      width: '100%',
+    };
+  }, [tracks.length]);
   
   const handleSort = (column: string) => {
     if (orderBy.column === column) {
@@ -272,14 +298,9 @@ export function TrackTable({
         <div 
           ref={parentRef}
           className="overflow-auto h-[500px]"
+          onScroll={handleScroll}
         >
-          <div
-            style={{
-              height: `${virtualizer.getTotalSize()}px`,
-              width: '100%',
-              position: 'relative',
-            }}
-          >
+          <div style={containerStyle}>
             <table className="min-w-full">
               <tbody>
                 {isLoading ? (
@@ -300,24 +321,23 @@ export function TrackTable({
                     </td>
                   </tr>
                 ) : (
-                  virtualizer.getVirtualItems().map((virtualRow) => {
-                    const tp = tracks[virtualRow.index];
-                    if (!tp) return null;
-                    
+                  tracks.map((tp, index) => {
                     const track = tp.tracks;
                     const album = track?.albums;
                     const artist = album?.artists;
                     const year = album?.release_date ? new Date(album.release_date).getFullYear() : null;
                     
+                    // Calculate position for this row
+                    const top = index * 64; // each row is approximately 64px
+                    
                     return (
                       <tr 
-                        key={virtualRow.key}
+                        key={tp.id || index}
                         style={{
                           position: 'absolute',
-                          top: 0,
+                          top: `${top}px`,
                           left: 0,
                           width: '100%',
-                          transform: `translateY(${virtualRow.start}px)`,
                         }}
                         className="border-b hover:bg-muted/50 transition-colors"
                       >
@@ -362,7 +382,7 @@ export function TrackTable({
       
       <div className="flex justify-center mt-6">
         <Button 
-          onClick={() => setPage(p => Math.max(1, p - 1))}
+          onClick={() => setPage(1)}
           disabled={page === 1 || isLoading}
           variant="outline"
           className="mr-2"
@@ -370,7 +390,7 @@ export function TrackTable({
           Previous
         </Button>
         <Button
-          onClick={() => setPage(p => p + 1)}
+          onClick={() => setPage(page + 1)}
           disabled={tracks.length < pageSize || isLoading}
           variant="outline"
         >

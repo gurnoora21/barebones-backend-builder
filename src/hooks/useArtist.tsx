@@ -23,6 +23,6 @@ export function useArtistProducers(
     queryKey: ['artistProducers', artistId, page, pageSize],
     queryFn: () => fetchArtistProducers(artistId, { page, pageSize }),
     enabled: !!artistId,
-    keepPreviousData: true,
+    placeholderData: (previousData) => previousData,
   });
 }

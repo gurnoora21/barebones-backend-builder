@@ -22,7 +22,7 @@ export type QueryListResult<T> = {
 
 // Generic fetch function for single items
 export async function fetchOne<T>(
-  table: string,
+  table: keyof Database['public']['Tables'],
   id: string
 ): Promise<QueryResult<T>> {
   const { data, error } = await supabase
@@ -31,12 +31,12 @@ export async function fetchOne<T>(
     .eq('id', id)
     .single();
 
-  return { data, error };
+  return { data: data as T, error };
 }
 
 // Generic fetch function for lists
 export async function fetchList<T>(
-  table: string,
+  table: keyof Database['public']['Tables'],
   options?: {
     page?: number;
     pageSize?: number;
@@ -70,7 +70,7 @@ export async function fetchList<T>(
   query = query.range(start, end);
 
   const { data, error } = await query;
-  return { data, error };
+  return { data: data as T[], error };
 }
 
 // Search across tables
@@ -88,7 +88,7 @@ export async function searchAcross(
   await Promise.all(
     tables.map(async (table) => {
       const { data, error } = await supabase
-        .from(table)
+        .from(table as keyof Database['public']['Tables'])
         .select('*')
         .ilike('name', `%${query}%`)
         .limit(limit);
