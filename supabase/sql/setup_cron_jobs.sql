@@ -114,7 +114,7 @@ BEGIN
     $$
   );
   
-  -- Schedule social enrichment worker every 2 minutes
+  -- Social enrichment worker is paused by default
   PERFORM cron.schedule(
     'social-enrichment-worker',
     '*/2 * * * *',
@@ -157,9 +157,17 @@ BEGIN
     ('album-discovery-worker', false),
     ('track-discovery-worker', false),
     ('producer-identification-worker', false),
-    ('social-enrichment-worker', false),
+    ('social-enrichment-worker', true),  -- Set this worker to paused
     ('maintenance-worker', false)
   ON CONFLICT (worker_name) DO NOTHING;
+  
+  -- Make sure social-enrichment-worker is specifically paused
+  UPDATE worker_status
+  SET is_paused = true,
+      paused_at = now(),
+      paused_by = 'system',
+      last_updated = now()
+  WHERE worker_name = 'social-enrichment-worker';
 END;
 $$;
 
