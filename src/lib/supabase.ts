@@ -1,3 +1,4 @@
+
 import { supabase } from "@/integrations/supabase/client";
 import { Artists, Albums, Tracks, Producers, TrackProducers, QueryResult, QueryListResult } from "./supabaseTypes";
 
@@ -89,7 +90,8 @@ export async function searchAcross(
 }
 
 // Export all the types for use in the app
-export { Artists, Albums, Tracks, Producers, TrackProducers };
+// Using "export type" to fix the isolatedModules errors
+export type { Artists, Albums, Tracks, Producers, TrackProducers };
 
 // Producer-specific functions
 export async function fetchProducer(id: string): Promise<QueryResult<Producers>> {

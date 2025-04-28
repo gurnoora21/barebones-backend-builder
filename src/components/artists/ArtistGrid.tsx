@@ -16,7 +16,11 @@ interface Artist {
   metadata?: any;
 }
 
-export function ArtistGrid() {
+interface ArtistGridProps {
+  artists?: Artist[];
+}
+
+export function ArtistGrid({ artists: providedArtists }: ArtistGridProps = {}) {
   const [page, setPage] = useState(1);
   const pageSize = 8;
   
@@ -30,9 +34,10 @@ export function ArtistGrid() {
     placeholderData: (previousData) => previousData,
   });
   
-  const artists = data?.data || [];
+  // Use provided artists if available, otherwise use fetched artists
+  const artists = providedArtists || data?.data || [];
   
-  if (isLoading) {
+  if (isLoading && !providedArtists) {
     return (
       <div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -52,7 +57,7 @@ export function ArtistGrid() {
         ))}
       </div>
       
-      {artists.length > 0 && (
+      {!providedArtists && artists.length > 0 && (
         <div className="flex justify-center mt-6">
           <Button
             variant="outline"
