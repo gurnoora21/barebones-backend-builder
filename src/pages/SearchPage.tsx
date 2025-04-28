@@ -79,7 +79,7 @@ export default function SearchPage() {
           <Button type="submit" className="ml-2">Search</Button>
         </form>
         
-        <Tabs value={searchType} onValueChange={(v: any) => setSearchType(v)}>
+        <Tabs defaultValue={searchType} onValueChange={(v: any) => setSearchType(v)}>
           <TabsList>
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="producers">Producers</TabsTrigger>
@@ -150,9 +150,9 @@ export default function SearchPage() {
               </TabsContent>
             </>
           ) : (
-            <div className="text-center py-12">
+            <TabsContent value="all" className="text-center py-12">
               <p className="text-muted-foreground">Enter a search term to find producers and artists</p>
-            </div>
+            </TabsContent>
           )}
         </Tabs>
       </section>
