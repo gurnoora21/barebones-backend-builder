@@ -10,6 +10,7 @@ interface Producer {
   name: string;
   instagram_handle?: string | null;
   metadata?: any;
+  image_url?: string | null;
   trackCount?: number;
   popularity?: number;
 }
@@ -58,8 +59,8 @@ export function ProducerGrid({ producers, isLoading = false }: ProducerGridProps
 function ProducerCard({ producer }: { producer: Producer }) {
   const { id, name, instagram_handle } = producer;
   
-  // Extract image from metadata if available
-  const imageUrl = producer.metadata?.image_url || null;
+  // Use direct image_url if available, fall back to metadata
+  const imageUrl = producer.image_url || producer.metadata?.image_url || null;
   
   // Debug individual producer
   useEffect(() => {

@@ -59,6 +59,9 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       // Fetch additional artist details from Spotify
       const artistDetails = await spotifyApi<any>(`artists/${artistId}`);
       
+      // Extract image URL from artist details
+      const imageUrl = artistDetails.images?.[0]?.url || null;
+      
       // Check if artist already exists
       const { data: existingArtist, error: selectError } = await this.supabase
         .from('artists')
@@ -87,9 +90,11 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         name: msg.artistName || artistDetails.name,
         followers: followersCount, // Use the extracted followers count
         popularity: artistDetails.popularity,
+        image_url: imageUrl, // Store the image URL
         metadata: { 
           ...existingArtist?.metadata,
           source: 'spotify',
+          images: artistDetails.images, // Store all images in metadata
           discovery_timestamp: new Date().toISOString()
         }
       };

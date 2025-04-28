@@ -1,6 +1,7 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getArtistAlbums, wait } from "../lib/spotifyClient.ts";
+import { getArtistAlbums, spotifyApi, wait } from "../lib/spotifyClient.ts";
 
 interface AlbumDiscoveryMsg {
   artistId: string;
@@ -59,6 +60,10 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       
       for (const album of albums.items) {
         try {
+          // Fetch full album details to get high-quality images
+          const fullAlbumDetails = await spotifyApi<any>(`albums/${album.id}`);
+          const coverUrl = fullAlbumDetails.images?.[0]?.url || null;
+          
           const formattedReleaseDate = this.formatReleaseDate(album.release_date);
           
           const { data: existingAlbum, error: selectError } = await this.supabase
@@ -79,10 +84,12 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
               artist_id: artist.id,
               name: album.name,
               release_date: formattedReleaseDate,
+              cover_url: coverUrl, // Store the cover URL
               metadata: {
                 source: 'spotify',
                 type: album.album_type,
                 total_tracks: album.total_tracks,
+                images: fullAlbumDetails.images, // Store all images in metadata
                 discovery_timestamp: new Date().toISOString()
               }
             });

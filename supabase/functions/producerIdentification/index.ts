@@ -1,6 +1,7 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getTrackDetails } from "../lib/spotifyClient.ts";
+import { getTrackDetails, spotifyApi } from "../lib/spotifyClient.ts";
 import { createGeniusClient } from "../lib/geniusClient.ts";
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from "../types.ts";
@@ -62,12 +63,30 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
       
       for (const artist of track.artists) {
         if (artist.id !== artistId) {  // Skip the main artist
-          spotifyProducers.push({
-            source: 'spotify',
-            name: artist.name,
-            confidence: 0.8, // High confidence for Spotify data
-            role: 'collaborator'
-          });
+          try {
+            // Fetch full collaborator details to get images
+            const collabDetails = await spotifyApi<any>(`artists/${artist.id}`);
+            const collabImage = collabDetails.images?.[0]?.url || null;
+            
+            spotifyProducers.push({
+              source: 'spotify',
+              name: artist.name,
+              confidence: 0.8, // High confidence for Spotify data
+              role: 'collaborator',
+              image_url: collabImage, // Store collaborator image URL
+              metadata: {
+                images: collabDetails.images || []
+              }
+            });
+          } catch (error) {
+            console.error(`Error fetching Spotify artist details for ${artist.name}:`, error);
+            spotifyProducers.push({
+              source: 'spotify',
+              name: artist.name,
+              confidence: 0.8,
+              role: 'collaborator'
+            });
+          }
         }
       }
       
@@ -89,13 +108,17 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
             const song = geniusSongResult?.response?.song;
             
             if (song) {
+              // Get fallback image from primary artist if available
+              const fallbackImage = song.primary_artist?.image_url || null;
+              
               // Extract producer artists
               const producers = (song.producer_artists || []).map((a: any) => ({
                 source: 'genius',
                 name: a.name,
                 confidence: 0.9, // Very high confidence for explicit producer credits
                 role: 'producer',
-                external_id: `genius-${a.id}`
+                external_id: `genius-${a.id}`,
+                image_url: a.image_url || fallbackImage // Use artist image or fallback
               }));
               
               // Extract writer artists
@@ -104,7 +127,8 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
                 name: a.name,
                 confidence: 0.9, // Very high confidence for explicit writer credits
                 role: 'writer',
-                external_id: `genius-${a.id}`
+                external_id: `genius-${a.id}`,
+                image_url: a.image_url || fallbackImage // Use artist image or fallback
               }));
               
               geniusProducers = [...producers, ...writers];
@@ -150,20 +174,27 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
           if (producer.role === 'producer' || producer.role === 'writer') {
             const { data: currentProducer } = await this.supabase
               .from('producers')
-              .select('metadata')
+              .select('metadata, image_url')
               .eq('id', producerId)
               .single();
             
             if (currentProducer) {
+              // Only update image if we don't already have one
+              const imageUrl = currentProducer.image_url || producer.image_url;
+              
               const updatedMetadata = {
                 ...currentProducer.metadata,
                 roles: [...new Set([...(currentProducer.metadata?.roles || []), producer.role])],
-                sources: [...new Set([...(currentProducer.metadata?.sources || []), producer.source])]
+                sources: [...new Set([...(currentProducer.metadata?.sources || []), producer.source])],
+                ...(producer.metadata || {})
               };
               
               await this.supabase
                 .from('producers')
-                .update({ metadata: updatedMetadata })
+                .update({ 
+                  metadata: updatedMetadata,
+                  image_url: imageUrl
+                })
                 .eq('id', producerId);
             }
           }
@@ -174,11 +205,13 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
             .insert({
               name: producer.name,
               normalized_name: normalizedName,
+              image_url: producer.image_url || null, // Store the image URL
               metadata: { 
                 source: producer.source,
                 roles: [producer.role],
                 external_ids: producer.external_id ? [producer.external_id] : [],
-                discovery_timestamp: new Date().toISOString()
+                discovery_timestamp: new Date().toISOString(),
+                ...(producer.metadata || {})
               }
             })
             .select('id')

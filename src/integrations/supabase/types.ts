@@ -12,6 +12,7 @@ export type Database = {
       albums: {
         Row: {
           artist_id: string
+          cover_url: string | null
           created_at: string | null
           id: string
           metadata: Json | null
@@ -22,6 +23,7 @@ export type Database = {
         }
         Insert: {
           artist_id: string
+          cover_url?: string | null
           created_at?: string | null
           id?: string
           metadata?: Json | null
@@ -32,6 +34,7 @@ export type Database = {
         }
         Update: {
           artist_id?: string
+          cover_url?: string | null
           created_at?: string | null
           id?: string
           metadata?: Json | null
@@ -63,6 +66,7 @@ export type Database = {
           followers: number | null
           genres: string[] | null
           id: string
+          image_url: string | null
           instagram_handle: string | null
           market: string | null
           metadata: Json | null
@@ -77,6 +81,7 @@ export type Database = {
           followers?: number | null
           genres?: string[] | null
           id?: string
+          image_url?: string | null
           instagram_handle?: string | null
           market?: string | null
           metadata?: Json | null
@@ -91,6 +96,7 @@ export type Database = {
           followers?: number | null
           genres?: string[] | null
           id?: string
+          image_url?: string | null
           instagram_handle?: string | null
           market?: string | null
           metadata?: Json | null
@@ -210,6 +216,7 @@ export type Database = {
           enriched_at: string | null
           enrichment_failed: boolean | null
           id: string
+          image_url: string | null
           instagram_bio: string | null
           instagram_handle: string | null
           metadata: Json | null
@@ -223,6 +230,7 @@ export type Database = {
           enriched_at?: string | null
           enrichment_failed?: boolean | null
           id?: string
+          image_url?: string | null
           instagram_bio?: string | null
           instagram_handle?: string | null
           metadata?: Json | null
@@ -236,6 +244,7 @@ export type Database = {
           enriched_at?: string | null
           enrichment_failed?: boolean | null
           id?: string
+          image_url?: string | null
           instagram_bio?: string | null
           instagram_handle?: string | null
           metadata?: Json | null
