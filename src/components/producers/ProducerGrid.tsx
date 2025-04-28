@@ -56,7 +56,7 @@ export function ProducerGrid({ producers, isLoading = false }: ProducerGridProps
 }
 
 function ProducerCard({ producer }: { producer: Producer }) {
-  const { id, name, instagram_handle, trackCount, popularity } = producer;
+  const { id, name, instagram_handle } = producer;
   
   // Extract image from metadata if available
   const imageUrl = producer.metadata?.image_url || null;
@@ -85,17 +85,21 @@ function ProducerCard({ producer }: { producer: Producer }) {
               @{instagram_handle}
             </p>
           )}
-          {popularity !== undefined && (
+          {producer.trackCount !== undefined && (
             <p className="text-xs text-muted-foreground mt-1">
-              Popularity: {popularity}
+              {producer.trackCount} tracks produced
             </p>
           )}
         </CardContent>
-        {trackCount !== undefined && (
-          <CardFooter className="pt-0 text-sm text-muted-foreground">
-            {trackCount} tracks produced
-          </CardFooter>
-        )}
+        <CardFooter className="pt-0 text-sm text-muted-foreground">
+          {producer.metadata?.genres?.length ? (
+            <span>{producer.metadata.genres.slice(0, 3).join(', ')}</span>
+          ) : instagram_handle ? (
+            <span>@{instagram_handle}</span>
+          ) : (
+            <span>Producer</span>
+          )}
+        </CardFooter>
       </Card>
     </Link>
   );

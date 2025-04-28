@@ -17,24 +17,25 @@ export default function HomePage() {
   const [page, setPage] = useState(1);
   const pageSize = 12;
   
-  // Fetch trending producers (those with most track credits)
+  // Fetch trending producers (sorted by creation date since popularity doesn't exist)
   const trendingProducersQuery = useQuery({
     queryKey: ['trendingProducers', page, pageSize],
     queryFn: () => fetchList<Producers>('producers', {
       page,
       pageSize,
-      orderBy: { column: 'popularity', ascending: false },
+      // Use created_at instead of popularity which doesn't exist
+      orderBy: { column: 'created_at', ascending: false },
     })
   });
   
-  // Fetch "hidden gems" producers (those with high quality but fewer credits)
+  // Fetch "hidden gems" producers (sort by name for now)
   const hiddenGemsQuery = useQuery({
     queryKey: ['hiddenGems', page, pageSize],
     queryFn: () => fetchList<Producers>('producers', {
       page,
       pageSize,
-      filters: { popularity: 'low' },
-      orderBy: { column: 'popularity', ascending: true },
+      // No filters since we don't have popularity
+      orderBy: { column: 'name', ascending: true },
     }),
     enabled: currentTab === 'hidden',
   });
