@@ -1,44 +1,24 @@
-
 import { supabase } from "@/integrations/supabase/client";
-import type { Database } from "@/integrations/supabase/types";
-import { PostgrestError } from "@supabase/supabase-js";
-
-// Define specific types for our data models
-export type Tables<T extends keyof Database['public']['Tables']> = Database['public']['Tables'][T]['Row'];
-export type Artists = Tables<'artists'>;
-export type Albums = Tables<'albums'>;
-export type Tracks = Tables<'tracks'>;
-export type Producers = Tables<'producers'>;
-export type TrackProducers = Tables<'track_producers'>;
-
-// Define return types for our queries
-export type QueryResult<T> = {
-  data: T | null;
-  error: PostgrestError | null;
-};
-
-export type QueryListResult<T> = {
-  data: T[] | null;
-  error: PostgrestError | null;
-};
+import { Artists, Albums, Tracks, Producers, TrackProducers, QueryResult, QueryListResult } from "./supabaseTypes";
 
 // Generic fetch function for single items
 export async function fetchOne<T>(
-  table: keyof Database['public']['Tables'],
+  table: string,
   id: string
 ): Promise<QueryResult<T>> {
+  // Using any to avoid deep type instantiation issues
   const { data, error } = await supabase
-    .from(table)
+    .from(table as any)
     .select('*')
     .eq('id', id)
     .single();
 
-  return { data: data as T, error };
+  return { data: data as T, error: error as Error };
 }
 
 // Generic fetch function for lists
 export async function fetchList<T>(
-  table: keyof Database['public']['Tables'],
+  table: string,
   options?: {
     page?: number;
     pageSize?: number;
@@ -50,7 +30,8 @@ export async function fetchList<T>(
   const start = (page - 1) * pageSize;
   const end = start + pageSize - 1;
 
-  let query = supabase.from(table).select('*');
+  // Using any to avoid deep type instantiation issues
+  let query = supabase.from(table as any).select('*');
 
   // Apply filters
   if (filters) {
@@ -72,7 +53,7 @@ export async function fetchList<T>(
   query = query.range(start, end);
 
   const { data, error } = await query;
-  return { data: data as T[], error };
+  return { data: data as T[], error: error as Error };
 }
 
 // Search across tables
@@ -88,8 +69,9 @@ export async function searchAcross(
 
   // Execute searches in parallel
   const promises = tables.map(async (table) => {
+    // Using any to avoid deep type instantiation issues
     const { data, error } = await supabase
-      .from(table as keyof Database['public']['Tables'])
+      .from(table as any)
       .select('*')
       .ilike('name', `%${query}%`)
       .limit(limit);
@@ -105,6 +87,9 @@ export async function searchAcross(
 
   return results;
 }
+
+// Export all the types for use in the app
+export { Artists, Albums, Tracks, Producers, TrackProducers };
 
 // Producer-specific functions
 export async function fetchProducer(id: string): Promise<QueryResult<Producers>> {
@@ -185,7 +170,7 @@ export async function fetchProducerTracks(
   query = query.range(start, end);
 
   const { data, error } = await query;
-  return { data, error };
+  return { data, error: error as Error };
 }
 
 // Artist-specific functions
@@ -246,7 +231,7 @@ export async function fetchArtistProducers(
 
   return { 
     data: Array.from(producerMap.values()).sort((a, b) => b.trackCount - a.trackCount),
-    error 
+    error: error as Error 
   };
 }
 
@@ -278,11 +263,12 @@ export async function searchByName(
 ): Promise<QueryListResult<any>> {
   const { type = 'producers', limit = 10 } = options || {};
   
+  // Using any to avoid deep type instantiation issues
   const { data, error } = await supabase
-    .from(type)
+    .from(type as any)
     .select('*')
     .ilike('name', `%${query}%`)
     .limit(limit);
 
-  return { data, error };
+  return { data, error: error as Error };
 }

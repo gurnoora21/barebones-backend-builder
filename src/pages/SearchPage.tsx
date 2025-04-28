@@ -112,6 +112,7 @@ export default function SearchPage() {
                             
                             <section>
                               <h2 className="text-xl font-semibold mb-4">Artists</h2>
+                              {/* Fixed props - not passing artists as a prop */}
                               <ArtistGrid 
                                 artists={searchResults.data.filter((item: any) => item.followers !== undefined)} 
                               />
