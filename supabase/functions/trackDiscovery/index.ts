@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getAlbumTracks, getTrackDetails, wait } from "../lib/spotifyClient.ts";
@@ -45,6 +46,22 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     }
   }
 
+  private async checkTrackExists(normalizedName: string, artistUuid: string): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from('normalized_tracks')
+      .select('id')
+      .eq('normalized_name', normalizedName)
+      .eq('artist_id', artistUuid)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {  // Not a "no rows" error
+      console.error(`Error checking for existing track ${normalizedName}:`, error);
+      throw error;
+    }
+    
+    return !!data; // Return true if the track exists, false otherwise
+  }
+
   protected async process(msg: TrackDiscoveryMsg): Promise<void> {
     const { albumId, albumName, artistId, offset = 0 } = msg;
     console.log(`Processing track discovery for album ${albumName} (${albumId}) with offset ${offset}`);
@@ -77,11 +94,10 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       
       let validTracksCount = 0;
       let filteredTracksCount = 0;
+      let duplicateTracksCount = 0;
       
       for (const track of tracks.items) {
         try {
-          const trackDetails = await getTrackDetails(track.id);
-          
           const isPrimaryArtist = track.artists && 
                                    track.artists.length > 0 && 
                                    track.artists[0].id === artistId;
@@ -93,6 +109,16 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           }
           
           const normalizedName = this.normalizeTrackName(track.name);
+          
+          // Check if this track already exists (by normalized name + artist)
+          const trackExists = await this.checkTrackExists(normalizedName, artistUuid);
+          if (trackExists) {
+            console.log(`Skipping duplicate track: ${track.name} (normalized: ${normalizedName})`);
+            duplicateTracksCount++;
+            continue;
+          }
+
+          const trackDetails = await getTrackDetails(track.id);
           
           const { error: trackUpsertError } = await this.supabase
             .from('tracks')
@@ -117,36 +143,20 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           }
           
           try {
-            const { data: existingNormalized, error: normalizedSelectError } = await this.supabase
+            const { error: normalizedError } = await this.supabase
               .from('normalized_tracks')
-              .select('id, representative_track_id')
-              .eq('normalized_name', normalizedName)
-              .eq('artist_id', artistUuid)
-              .single();
+              .upsert({
+                normalized_name: normalizedName,
+                artist_id: artistUuid,
+                representative_track_id: track.id
+              });
 
-            if (normalizedSelectError && normalizedSelectError.code !== 'PGRST116') {
-              console.error(`Error checking for normalized track ${normalizedName}:`, normalizedSelectError);
-              throw normalizedSelectError;
+            if (normalizedError) {
+              console.error('Error upserting normalized track:', normalizedError);
+              throw normalizedError;
             }
-
-            if (!existingNormalized) {
-              const { error: normalizedError } = await this.supabase
-                .from('normalized_tracks')
-                .upsert({
-                  normalized_name: normalizedName,
-                  artist_id: artistUuid,
-                  representative_track_id: track.id
-                });
-
-              if (normalizedError) {
-                console.error('Error upserting normalized track:', normalizedError);
-                throw normalizedError;
-              }
-              
-              console.log(`Created new normalized track entry: ${normalizedName}`);
-            } else {
-              console.log(`Found existing normalized track: ${normalizedName}`);
-            }
+            
+            console.log(`Created new normalized track entry: ${normalizedName}`);
           } catch (normalizedError) {
             console.error(`Error handling normalized track ${normalizedName}:`, normalizedError);
           }
@@ -167,7 +177,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         }
       }
       
-      console.log(`Processed ${tracks.items.length} tracks, valid: ${validTracksCount}, filtered: ${filteredTracksCount}`);
+      console.log(`Processed ${tracks.items.length} tracks, valid: ${validTracksCount}, filtered: ${filteredTracksCount}, duplicates: ${duplicateTracksCount}`);
       
       if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && validTracksCount > 0) {
         const newOffset = offset + tracks.items.length;
