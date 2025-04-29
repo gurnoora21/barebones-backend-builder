@@ -4,6 +4,60 @@ import { globalCache } from './cache.ts';
 import { RateLimiter } from './rateLimiter.ts';
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
+import { logger } from './logger.ts';
+import { withRateLimitedRetry } from './retry.ts';
+
+/**
+ * Interface for Genius API search results
+ */
+export interface GeniusSearchResult {
+  meta: {
+    status: number;
+  };
+  response: {
+    hits: Array<{
+      result: {
+        id: number;
+        title: string;
+        primary_artist: {
+          id: number;
+          name: string;
+          image_url?: string;
+        };
+      };
+    }>;
+  };
+}
+
+/**
+ * Interface for Genius song details response
+ */
+export interface GeniusSongResult {
+  meta: {
+    status: number;
+  };
+  response: {
+    song: {
+      id: number;
+      title: string;
+      primary_artist: {
+        id: number;
+        name: string;
+        image_url?: string;
+      };
+      producer_artists?: Array<{
+        id: number;
+        name: string;
+        image_url?: string;
+      }>;
+      writer_artists?: Array<{
+        id: number;
+        name: string;
+        image_url?: string;
+      }>;
+    };
+  };
+}
 
 /**
  * Genius API client with resilience features
@@ -14,6 +68,7 @@ import { Database } from '../types.ts';
 export class GeniusClient {
   private circuitBreaker;
   private rateLimiter;
+  private logger = logger.child({ service: 'GeniusAPI' });
 
   constructor(private token: string, private supabase: SupabaseClient<Database>) {
     this.circuitBreaker = CircuitBreakerRegistry.getOrCreate({
@@ -32,9 +87,10 @@ export class GeniusClient {
    * @param artist - Artist name
    * @returns Search results
    */
-  async search(song: string, artist: string): Promise<any> {
+  async search(song: string, artist: string): Promise<GeniusSearchResult> {
     const query = encodeURIComponent(`${artist} ${song}`);
     const cacheKey = `genius-search:${query}`;
+    const contextLogger = this.logger.child({ operation: 'search', song, artist });
     
     try {
       // Check rate limits before making request
@@ -45,27 +101,48 @@ export class GeniusClient {
       });
 
       if (!canProceed) {
+        contextLogger.warn('Rate limit exceeded for Genius API');
         throw new Error('Rate limit exceeded for Genius API');
       }
 
       // Use cache with 7-day TTL for search results
-      return globalCache.getOrFetch(cacheKey, async () => {
+      return globalCache.getOrFetch<GeniusSearchResult>(cacheKey, async () => {
         // Use circuit breaker to handle API errors
         return this.circuitBreaker.fire(async () => {
-          const res = await fetch(`${API}/search?q=${query}`, {
-            headers: { Authorization: `Bearer ${this.token}` }
-          });
+          contextLogger.debug(`Making Genius API search request`, { query });
+          
+          // Use rate-limited retry with exponential backoff
+          return withRateLimitedRetry(async () => {
+            const res = await fetch(`${API}/search?q=${query}`, {
+              headers: { Authorization: `Bearer ${this.token}` }
+            });
 
-          if (!res.ok) {
-            const errorText = await res.text();
-            throw new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
-          }
+            if (!res.ok) {
+              const errorText = await res.text();
+              const error = new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
+              
+              // Add response info to the error for better handling
+              (error as any).status = res.status;
+              (error as any).headers = res.headers;
+              
+              contextLogger.error(`Search request failed`, error, {
+                status: res.status,
+                query
+              });
+              
+              throw error;
+            }
 
-          return res.json();
+            const data = await res.json();
+            contextLogger.debug(`Search request successful`, {
+              hitCount: data.response?.hits?.length || 0
+            });
+            return data;
+          }, 'genius-search');
         });
       }, 7 * 24 * 60 * 60 * 1000); // 7-day cache
     } catch (error) {
-      console.error(`Error in Genius API search for "${query}":`, error);
+      contextLogger.error(`Error in Genius API search for "${query}"`, error);
       throw error;
     }
   }
@@ -75,12 +152,13 @@ export class GeniusClient {
    * @param id - Genius song ID
    * @returns Song details including producers and writers
    */
-  async getSong(id: number): Promise<any> {
+  async getSong(id: number): Promise<GeniusSongResult> {
     if (!id) {
       throw new Error('Invalid Genius song ID');
     }
     
     const cacheKey = `genius-song:${id}`;
+    const contextLogger = this.logger.child({ operation: 'getSong', songId: id });
     
     try {
       // Check rate limits before making request
@@ -91,27 +169,53 @@ export class GeniusClient {
       });
 
       if (!canProceed) {
+        contextLogger.warn('Rate limit exceeded for Genius API');
         throw new Error('Rate limit exceeded for Genius API');
       }
 
       // Use cache with 30-day TTL for song details (unlikely to change)
-      return globalCache.getOrFetch(cacheKey, async () => {
+      return globalCache.getOrFetch<GeniusSongResult>(cacheKey, async () => {
         // Use circuit breaker to handle API errors
         return this.circuitBreaker.fire(async () => {
-          const res = await fetch(`${API}/songs/${id}`, {
-            headers: { Authorization: `Bearer ${this.token}` }
-          });
+          contextLogger.debug(`Making Genius API song request`, { songId: id });
           
-          if (!res.ok) {
-            const errorText = await res.text();
-            throw new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
-          }
+          // Use rate-limited retry with exponential backoff
+          return withRateLimitedRetry(async () => {
+            const res = await fetch(`${API}/songs/${id}`, {
+              headers: { Authorization: `Bearer ${this.token}` }
+            });
+            
+            if (!res.ok) {
+              const errorText = await res.text();
+              const error = new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
+              
+              // Add response info to the error for better handling
+              (error as any).status = res.status;
+              (error as any).headers = res.headers;
+              
+              contextLogger.error(`Song details request failed`, error, {
+                status: res.status,
+                songId: id
+              });
+              
+              throw error;
+            }
 
-          return res.json();
+            const data = await res.json();
+            
+            contextLogger.debug(`Song details request successful`, {
+              songId: id,
+              title: data.response?.song?.title,
+              producerCount: data.response?.song?.producer_artists?.length || 0,
+              writerCount: data.response?.song?.writer_artists?.length || 0
+            });
+            
+            return data;
+          }, 'genius-song');
         });
       }, 30 * 24 * 60 * 60 * 1000); // 30-day cache
     } catch (error) {
-      console.error(`Error in Genius API getSong for ID ${id}:`, error);
+      contextLogger.error(`Error in Genius API getSong for ID ${id}`, error);
       throw error;
     }
   }

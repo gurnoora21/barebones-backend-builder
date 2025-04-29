@@ -5,15 +5,18 @@ let spotifyTokenExpiry = 0;
 
 import { CircuitBreakerRegistry } from './circuitBreaker.ts';
 import { globalCache } from './cache.ts';
+import { logger } from './logger.ts';
+import { withRetry, withRateLimitedRetry, wait, getRetryDelayFromHeaders } from './retry.ts';
+import { getEnvConfig } from './dbHelpers.ts';
+
+// Create a logger instance specifically for Spotify API
+const spotifyLogger = logger.child({ service: 'SpotifyAPI' });
+const env = getEnvConfig();
 
 /** Get a valid Spotify access token via Client Credentials Flow */
 async function refreshSpotifyToken(): Promise<void> {
-  const clientId = Deno.env.get('SPOTIFY_CLIENT_ID');
-  const clientSecret = Deno.env.get('SPOTIFY_CLIENT_SECRET');
-  
-  if (!clientId || !clientSecret) {
-    throw new Error('Missing Spotify credentials in environment variables');
-  }
+  const clientId = env.getRequired('SPOTIFY_CLIENT_ID');
+  const clientSecret = env.getRequired('SPOTIFY_CLIENT_SECRET');
   
   const creds = btoa(`${clientId}:${clientSecret}`);
   
@@ -25,13 +28,30 @@ async function refreshSpotifyToken(): Promise<void> {
   });
   
   await circuit.fire(async () => {
-    const resp = await fetch(SPOTIFY_TOKEN_URL, {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Basic ${creds}`, 
-        'Content-Type': 'application/x-www-form-urlencoded' 
-      },
-      body: 'grant_type=client_credentials',
+    spotifyLogger.debug('Refreshing Spotify access token');
+    
+    const resp = await withRetry(async () => {
+      const response = await fetch(SPOTIFY_TOKEN_URL, {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Basic ${creds}`, 
+          'Content-Type': 'application/x-www-form-urlencoded' 
+        },
+        body: 'grant_type=client_credentials',
+      });
+      
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        const error = new Error(`Failed to refresh Spotify token: ${resp.status} ${resp.statusText}. Details: ${errorText}`);
+        (error as any).status = resp.status;
+        (error as any).headers = resp.headers;
+        throw error;
+      }
+      
+      return response;
+    }, {
+      maxAttempts: 5,
+      initialDelayMs: 1000
     });
     
     if (!resp.ok) {
@@ -45,7 +65,10 @@ async function refreshSpotifyToken(): Promise<void> {
     const refreshBuffer = Math.min(60000, data.expires_in * 100);
     spotifyTokenExpiry = Date.now() + (data.expires_in * 1000) - refreshBuffer;
     
-    console.log('Refreshed Spotify access token, expires in', data.expires_in, 'seconds');
+    spotifyLogger.info('Refreshed Spotify access token', { 
+      expiresIn: data.expires_in,
+      expiryTime: new Date(spotifyTokenExpiry).toISOString()
+    });
   });
 }
 
@@ -58,6 +81,8 @@ async function ensureToken(): Promise<string> {
 
 /** Call Spotify API with the proper token and retry logic */
 export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
+  const contextLogger = spotifyLogger.child({ operation: path.split('?')[0] });
+  
   // Create a unique cache key for this request
   const cacheKey = `spotify-api:${path}`;
   
@@ -72,14 +97,14 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
     });
     
     return circuit.fire(async () => {
-      for (let attempt = 1; attempt <= retries; attempt++) {
+      return withRateLimitedRetry(async () => {
+        const token = await ensureToken();
+        
+        // Set up a controller for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+        
         try {
-          const token = await ensureToken();
-          
-          // Set up a controller for timeout
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-          
           const res = await fetch(`https://api.spotify.com/v1/${path}`, {
             headers: { 'Authorization': `Bearer ${token}` },
             signal: controller.signal
@@ -89,27 +114,44 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
           
           if (res.status === 429) {
             // Rate limited - get retry-after header and wait
-            const retryAfter = res.headers.get('Retry-After') || '1';
-            const waitTime = parseInt(retryAfter, 10) * 1000;
-            console.log(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`);
-            await wait(waitTime);
-            continue;
+            const retryAfter = res.headers.get('Retry-After');
+            const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
+            
+            contextLogger.warn(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`);
+            
+            // Let the retry mechanism handle this
+            const error = new Error(`Spotify API rate limited`);
+            (error as any).status = 429;
+            (error as any).headers = res.headers;
+            throw error;
           }
           
           if (!res.ok) {
             const errorText = await res.text();
-            throw new Error(`Spotify API error: ${res.status} ${res.statusText}. Details: ${errorText}`);
+            const error = new Error(`Spotify API error: ${res.status} ${res.statusText}. Details: ${errorText}`);
+            (error as any).status = res.status;
+            (error as any).headers = res.headers;
+            throw error;
           }
           
-          return res.json();
-        } catch (err) {
-          if (attempt === retries) throw err;
-          console.warn(`Spotify API error (attempt ${attempt}/${retries}):`, err);
-          await wait(1000 * Math.pow(2, attempt-1)); // Exponential backoff
+          const data = await res.json();
+          return data as T;
+          
+        } catch (error) {
+          clearTimeout(timeoutId);
+          
+          // Handle AbortError specifically
+          if (error.name === 'AbortError') {
+            throw new Error(`Spotify API request timed out for ${path}`);
+          }
+          
+          throw error;
         }
-      }
-      
-      throw new Error('Should not reach here - all retries failed');
+      }, 'spotify-api', {
+        maxAttempts: retries,
+        initialDelayMs: 2000,
+        maxDelayMs: 30000
+      });
     });
   }, 600000); // 10 minute cache TTL for Spotify data
 }
@@ -126,17 +168,27 @@ export async function getSpotifyArtistId(name: string): Promise<string | null> {
     const data = await spotifyApi<any>(`search?q=${encodeURIComponent(name)}&type=artist&limit=1`);
     return data.artists.items[0]?.id || null;
   } catch (error) {
-    console.error(`Error getting artist ID for ${name}:`, error);
+    spotifyLogger.error(`Error getting artist ID for ${name}:`, error);
     return null;
   }
 }
 
 export async function getArtistAlbums(artistId: string, offset = 0): Promise<any> {
+  const contextLogger = spotifyLogger.child({ 
+    operation: 'getArtistAlbums',
+    artistId,
+    offset 
+  });
+  
   // Only get albums and singles where the artist is the primary artist
   // We'll filter further in the results to ensure they're truly primary artist releases
   const albums = await spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
   
   if (albums && albums.items) {
+    contextLogger.debug(`Retrieved ${albums.items.length} albums from Spotify`, {
+      total: albums.total
+    });
+    
     // Filter to only include albums where the specified artist is the primary artist
     albums.items = albums.items.filter(album => {
       // Exclude compilations and appears_on album types
@@ -150,6 +202,8 @@ export async function getArtistAlbums(artistId: string, offset = 0): Promise<any
     
     // Update the total count to reflect our filtered results
     albums.total = albums.items.length;
+    
+    contextLogger.debug(`Filtered to ${albums.items.length} primary artist albums`);
   }
   
   return albums;

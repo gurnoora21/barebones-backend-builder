@@ -108,6 +108,99 @@ export type Database = {
         }
         Relationships: []
       }
+      circuit_breaker_events: {
+        Row: {
+          circuit_name: string
+          created_at: string
+          details: Json | null
+          failure_count: number
+          id: string
+          new_state: string
+          old_state: string
+        }
+        Insert: {
+          circuit_name: string
+          created_at?: string
+          details?: Json | null
+          failure_count: number
+          id?: string
+          new_state: string
+          old_state: string
+        }
+        Update: {
+          circuit_name?: string
+          created_at?: string
+          details?: Json | null
+          failure_count?: number
+          id?: string
+          new_state?: string
+          old_state?: string
+        }
+        Relationships: []
+      }
+      circuit_breaker_executions: {
+        Row: {
+          circuit_name: string
+          created_at: string
+          details: Json | null
+          duration_ms: number
+          id: string
+          state: string
+          success: boolean
+        }
+        Insert: {
+          circuit_name: string
+          created_at?: string
+          details?: Json | null
+          duration_ms: number
+          id?: string
+          state: string
+          success: boolean
+        }
+        Update: {
+          circuit_name?: string
+          created_at?: string
+          details?: Json | null
+          duration_ms?: number
+          id?: string
+          state?: string
+          success?: boolean
+        }
+        Relationships: []
+      }
+      circuit_breakers: {
+        Row: {
+          failure_count: number
+          failure_threshold: number
+          last_failure_time: string | null
+          last_state_change: string
+          name: string
+          reset_timeout_ms: number
+          state: string
+          success_count: number
+        }
+        Insert: {
+          failure_count?: number
+          failure_threshold: number
+          last_failure_time?: string | null
+          last_state_change?: string
+          name: string
+          reset_timeout_ms: number
+          state: string
+          success_count?: number
+        }
+        Update: {
+          failure_count?: number
+          failure_threshold?: number
+          last_failure_time?: string | null
+          last_state_change?: string
+          name?: string
+          reset_timeout_ms?: number
+          state?: string
+          success_count?: number
+        }
+        Relationships: []
+      }
       maintenance_logs: {
         Row: {
           id: string
@@ -299,11 +392,36 @@ export type Database = {
         }
         Relationships: []
       }
+      rate_limit_events: {
+        Row: {
+          created_at: string
+          details: Json | null
+          event: string
+          id: string
+          key: string
+        }
+        Insert: {
+          created_at?: string
+          details?: Json | null
+          event: string
+          id?: string
+          key: string
+        }
+        Update: {
+          created_at?: string
+          details?: Json | null
+          event?: string
+          id?: string
+          key?: string
+        }
+        Relationships: []
+      }
       rate_limits: {
         Row: {
           count: number
           created_at: string | null
           key: string
+          metadata: Json | null
           updated_at: string | null
           window_end: number
         }
@@ -311,6 +429,7 @@ export type Database = {
           count?: number
           created_at?: string | null
           key: string
+          metadata?: Json | null
           updated_at?: string | null
           window_end: number
         }
@@ -318,6 +437,7 @@ export type Database = {
           count?: number
           created_at?: string | null
           key?: string
+          metadata?: Json | null
           updated_at?: string | null
           window_end?: number
         }
@@ -688,6 +808,14 @@ export type Database = {
       }
     }
     Functions: {
+      atomic_increment: {
+        Args: { counter_key: string; increment_by?: number; metadata?: Json }
+        Returns: number
+      }
+      atomic_reset_counter: {
+        Args: { counter_key: string; new_window_end?: number }
+        Returns: undefined
+      }
       check_queue_health: {
         Args: Record<PropertyKey, never>
         Returns: {

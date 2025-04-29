@@ -1,4 +1,7 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { logger } from "./logger.ts";
+import { wait } from "./retry.ts";
 
 export enum CircuitState {
   CLOSED = 'closed',   // Normal operation - requests go through
@@ -21,6 +24,7 @@ export class CircuitBreaker {
   private lastStateChange: number = Date.now();
   private options: CircuitBreakerOptions;
   private supabase: any;
+  private logger = logger.child({ component: 'CircuitBreaker' });
   
   constructor(options: CircuitBreakerOptions, supabaseClient?: any) {
     this.options = {
@@ -30,10 +34,21 @@ export class CircuitBreaker {
       ...options
     };
     this.supabase = supabaseClient;
+    
+    // Auto-initialize from database if supabase client is provided
+    if (this.supabase) {
+      this.syncStateFromStorage().catch(err => {
+        this.logger.error(`Error initializing circuit breaker from database`, err);
+      });
+    }
   }
   
   async fire<T>(action: () => Promise<T>): Promise<T> {
     const startTime = Date.now();
+    const operationLogger = this.logger.child({ 
+      circuit: this.options.name, 
+      state: this.state 
+    });
     
     if (this.supabase) {
       await this.syncStateFromStorage();
@@ -43,8 +58,14 @@ export class CircuitBreaker {
       const now = Date.now();
       if (now - this.lastFailureTime > this.options.resetTimeoutMs) {
         await this.changeState(CircuitState.HALF_OPEN);
-        console.log(`Circuit ${this.options.name} entering half-open state`);
+        operationLogger.info(`Circuit ${this.options.name} entering half-open state`);
       } else {
+        const remainingMs = this.lastFailureTime + this.options.resetTimeoutMs - now;
+        operationLogger.debug(`Circuit ${this.options.name} is open; failing fast`, { 
+          remainingMs,
+          resetAt: new Date(this.lastFailureTime + this.options.resetTimeoutMs).toISOString()
+        });
+        
         throw new Error(`Circuit ${this.options.name} is open; failing fast until ${new Date(this.lastFailureTime + this.options.resetTimeoutMs).toISOString()}`);
       }
     }
@@ -53,20 +74,20 @@ export class CircuitBreaker {
       const result = await action();
       const duration = Date.now() - startTime;
       
-      this.logExecution(true, duration);
+      await this.logExecution(true, duration);
       
       if (this.state === CircuitState.HALF_OPEN) {
         this.successCount++;
         if (this.successCount >= (this.options.halfOpenSuccessThreshold || 1)) {
           await this.reset();
-          console.log(`Circuit ${this.options.name} closed after ${this.successCount} successful tests`);
+          operationLogger.info(`Circuit ${this.options.name} closed after ${this.successCount} successful tests`);
         }
       }
       
       return result;
     } catch (error) {
       const duration = Date.now() - startTime;
-      this.logExecution(false, duration, error);
+      await this.logExecution(false, duration, error);
       await this.handleFailure();
       throw error;
     }
@@ -81,10 +102,10 @@ export class CircuitBreaker {
       this.failureCount >= this.options.failureThreshold
     ) {
       await this.changeState(CircuitState.OPEN);
-      console.log(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
+      this.logger.warn(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
     } else if (this.state === CircuitState.HALF_OPEN) {
       await this.changeState(CircuitState.OPEN);
-      console.log(`Circuit ${this.options.name} reopened after failed test`);
+      this.logger.warn(`Circuit ${this.options.name} reopened after failed test`);
       this.successCount = 0;
     }
     
@@ -108,7 +129,7 @@ export class CircuitBreaker {
     this.state = newState;
     this.lastStateChange = Date.now();
     
-    console.log(`Circuit ${this.options.name} state changed from ${oldState} to ${newState}`);
+    this.logger.info(`Circuit ${this.options.name} state changed from ${oldState} to ${newState}`);
     
     if (this.supabase) {
       try {
@@ -126,7 +147,7 @@ export class CircuitBreaker {
             }
           });
       } catch (err) {
-        console.error(`Failed to log circuit state change to database: ${err}`);
+        this.logger.error(`Failed to log circuit state change to database`, err);
       }
     }
   }
@@ -151,7 +172,7 @@ export class CircuitBreaker {
             }
           });
       } catch (err) {
-        console.error(`Failed to log circuit execution: ${err}`);
+        this.logger.error(`Failed to log circuit execution`, err);
       }
     }
   }
@@ -165,7 +186,7 @@ export class CircuitBreaker {
         .maybeSingle();
         
       if (error) {
-        console.error(`Error fetching circuit state: ${error.message}`);
+        this.logger.error(`Error fetching circuit state: ${error.message}`);
         return;
       }
       
@@ -173,16 +194,25 @@ export class CircuitBreaker {
         this.state = data.state as CircuitState;
         this.failureCount = data.failure_count;
         this.successCount = data.success_count;
-        this.lastFailureTime = new Date(data.last_failure_time).getTime();
-        this.lastStateChange = new Date(data.last_state_change).getTime();
+        this.lastFailureTime = data.last_failure_time ? new Date(data.last_failure_time).getTime() : 0;
+        this.lastStateChange = data.last_state_change ? new Date(data.last_state_change).getTime() : Date.now();
         
+        // Automatic transition to HALF_OPEN if needed
         if (this.state === CircuitState.OPEN && 
             Date.now() - this.lastFailureTime > this.options.resetTimeoutMs) {
           await this.changeState(CircuitState.HALF_OPEN);
         }
+        
+        this.logger.debug(`Circuit state loaded from database`, { 
+          name: this.options.name, 
+          state: this.state 
+        });
+      } else {
+        // Initialize state in database
+        await this.syncStateToStorage();
       }
     } catch (err) {
-      console.error(`Error syncing circuit state from storage: ${err}`);
+      this.logger.error(`Error syncing circuit state from storage`, err);
     }
   }
   
@@ -200,8 +230,13 @@ export class CircuitBreaker {
           last_failure_time: this.lastFailureTime ? new Date(this.lastFailureTime).toISOString() : null,
           last_state_change: new Date(this.lastStateChange).toISOString()
         });
+        
+      this.logger.debug(`Circuit state synchronized to database`, { 
+        name: this.options.name,
+        state: this.state
+      });
     } catch (err) {
-      console.error(`Error syncing circuit state to storage: ${err}`);
+      this.logger.error(`Error syncing circuit state to storage`, err);
     }
   }
   
@@ -227,23 +262,31 @@ export class CircuitBreaker {
 export class CircuitBreakerRegistry {
   private static circuits: Map<string, CircuitBreaker> = new Map();
   private static supabaseClient: any = null;
+  private static logger = logger.child({ component: 'CircuitBreakerRegistry' });
   
   static setSupabaseClient(client: any): void {
     this.supabaseClient = client;
   }
   
   static getOrCreate(options: CircuitBreakerOptions): CircuitBreaker {
-    if (!this.circuits.has(options.name)) {
+    const circuitName = options.name;
+    
+    if (!this.circuits.has(circuitName)) {
+      this.logger.debug(`Creating new circuit breaker: ${circuitName}`);
       const circuit = new CircuitBreaker(options, this.supabaseClient);
-      this.circuits.set(options.name, circuit);
+      this.circuits.set(circuitName, circuit);
     }
-    return this.circuits.get(options.name)!;
+    
+    return this.circuits.get(circuitName)!;
   }
   
   static async reset(name: string): Promise<void> {
     const circuit = this.circuits.get(name);
     if (circuit) {
       await circuit.reset();
+      this.logger.info(`Circuit ${name} was manually reset`);
+    } else {
+      this.logger.warn(`Attempted to reset non-existent circuit: ${name}`);
     }
   }
   
@@ -253,7 +296,7 @@ export class CircuitBreakerRegistry {
   
   static async loadFromStorage(): Promise<void> {
     if (!this.supabaseClient) {
-      console.log('No Supabase client provided, skipping loading circuit breakers from storage');
+      this.logger.info('No Supabase client provided, skipping loading circuit breakers from storage');
       return;
     }
     
@@ -263,11 +306,11 @@ export class CircuitBreakerRegistry {
         .select('*');
         
       if (error) {
-        console.error(`Error loading circuit breakers: ${error.message}`);
+        this.logger.error(`Error loading circuit breakers: ${error.message}`);
         return;
       }
       
-      if (data) {
+      if (data && data.length > 0) {
         for (const record of data) {
           const options: CircuitBreakerOptions = {
             name: record.name,
@@ -277,10 +320,10 @@ export class CircuitBreakerRegistry {
           
           this.getOrCreate(options);
         }
-        console.log(`Loaded ${data.length} circuit breakers from database`);
+        this.logger.info(`Loaded ${data.length} circuit breakers from database`);
       }
     } catch (err) {
-      console.error(`Error loading circuit breakers from storage: ${err}`);
+      this.logger.error(`Error loading circuit breakers from storage`, err);
     }
   }
 }
