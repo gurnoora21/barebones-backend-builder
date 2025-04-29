@@ -1,7 +1,6 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { logger } from "./logger.ts";
-import { wait } from "./retry.ts";
+import { wait, getRetryDelayFromHeaders } from "./retry.ts";
 
 export enum CircuitState {
   CLOSED = 'closed',   // Normal operation - requests go through
@@ -25,6 +24,8 @@ export class CircuitBreaker {
   private options: CircuitBreakerOptions;
   private supabase: any;
   private logger = logger.child({ component: 'CircuitBreaker' });
+  private lastRequestTime: number = 0;
+  private customResetTimeout: number | null = null;
   
   constructor(options: CircuitBreakerOptions, supabaseClient?: any) {
     this.options = {
@@ -56,18 +57,36 @@ export class CircuitBreaker {
     
     if (this.state === CircuitState.OPEN) {
       const now = Date.now();
-      if (now - this.lastFailureTime > this.options.resetTimeoutMs) {
+      // Use customResetTimeout if set (from Retry-After headers)
+      const resetTimeoutMs = this.customResetTimeout || this.options.resetTimeoutMs;
+      
+      if (now - this.lastFailureTime > resetTimeoutMs) {
         await this.changeState(CircuitState.HALF_OPEN);
         operationLogger.info(`Circuit ${this.options.name} entering half-open state`);
       } else {
-        const remainingMs = this.lastFailureTime + this.options.resetTimeoutMs - now;
+        const remainingMs = this.lastFailureTime + resetTimeoutMs - now;
         operationLogger.debug(`Circuit ${this.options.name} is open; failing fast`, { 
           remainingMs,
-          resetAt: new Date(this.lastFailureTime + this.options.resetTimeoutMs).toISOString()
+          resetAt: new Date(this.lastFailureTime + resetTimeoutMs).toISOString()
         });
         
-        throw new Error(`Circuit ${this.options.name} is open; failing fast until ${new Date(this.lastFailureTime + this.options.resetTimeoutMs).toISOString()}`);
+        throw new Error(`Circuit ${this.options.name} is open; failing fast until ${new Date(this.lastFailureTime + resetTimeoutMs).toISOString()}`);
       }
+    }
+    
+    // For HALF_OPEN state, ensure requests are properly spaced
+    if (this.state === CircuitState.HALF_OPEN) {
+      const now = Date.now();
+      const timeSinceLastRequest = now - this.lastRequestTime;
+      
+      // Only allow one request every 10 seconds in HALF_OPEN state
+      if (timeSinceLastRequest < 10000) {
+        const waitTime = 10000 - timeSinceLastRequest;
+        operationLogger.debug(`Waiting ${waitTime}ms before next half-open test`);
+        await wait(waitTime);
+      }
+      
+      this.lastRequestTime = Date.now();
     }
     
     try {
@@ -88,18 +107,42 @@ export class CircuitBreaker {
     } catch (error) {
       const duration = Date.now() - startTime;
       await this.logExecution(false, duration, error);
-      await this.handleFailure();
+      await this.handleFailure(error);
       throw error;
     }
   }
   
-  private async handleFailure(): Promise<void> {
+  // New method to record a failure from response for rate limits
+  async recordFailure(response: Response): Promise<void> {
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After');
+      if (retryAfter) {
+        // Parse the retry delay from headers
+        const retryDelayMs = getRetryDelayFromHeaders(response.headers);
+        
+        if (retryDelayMs) {
+          // Set custom reset timeout based on Retry-After
+          this.customResetTimeout = retryDelayMs;
+          this.logger.info(`Setting custom reset timeout for ${this.options.name}: ${retryDelayMs}ms`);
+        }
+      }
+    }
+    
+    await this.handleFailure();
+  }
+  
+  private async handleFailure(error?: any): Promise<void> {
     this.failureCount++;
     this.lastFailureTime = Date.now();
     
+    const isRateLimitError = error && (
+      error.status === 429 || 
+      (error.message && error.message.includes('rate limit'))
+    );
+    
     if (
-      this.state === CircuitState.CLOSED && 
-      this.failureCount >= this.options.failureThreshold
+      (this.state === CircuitState.CLOSED && this.failureCount >= this.options.failureThreshold) ||
+      (this.state === CircuitState.CLOSED && isRateLimitError && this.options.name.includes('rate-limit'))
     ) {
       await this.changeState(CircuitState.OPEN);
       this.logger.warn(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
@@ -117,6 +160,7 @@ export class CircuitBreaker {
   async reset(): Promise<void> {
     this.failureCount = 0;
     this.successCount = 0;
+    this.customResetTimeout = null;  // Reset custom timeout
     await this.changeState(CircuitState.CLOSED);
     
     if (this.supabase) {
@@ -142,7 +186,7 @@ export class CircuitBreaker {
             failure_count: this.failureCount,
             details: {
               threshold: this.options.failureThreshold,
-              reset_timeout_ms: this.options.resetTimeoutMs,
+              reset_timeout_ms: this.customResetTimeout || this.options.resetTimeoutMs,
               last_failure: this.lastFailureTime ? new Date(this.lastFailureTime).toISOString() : null
             }
           });
@@ -226,7 +270,7 @@ export class CircuitBreaker {
           failure_count: this.failureCount,
           success_count: this.successCount,
           failure_threshold: this.options.failureThreshold,
-          reset_timeout_ms: this.options.resetTimeoutMs,
+          reset_timeout_ms: this.customResetTimeout || this.options.resetTimeoutMs,
           last_failure_time: this.lastFailureTime ? new Date(this.lastFailureTime).toISOString() : null,
           last_state_change: new Date(this.lastStateChange).toISOString()
         });
@@ -251,7 +295,7 @@ export class CircuitBreaker {
       failureCount: this.failureCount,
       successCount: this.successCount,
       failureThreshold: this.options.failureThreshold,
-      resetTimeoutMs: this.options.resetTimeoutMs,
+      resetTimeoutMs: this.customResetTimeout || this.options.resetTimeoutMs,
       lastFailureTime: this.lastFailureTime ? new Date(this.lastFailureTime).toISOString() : null,
       lastStateChange: new Date(this.lastStateChange).toISOString(),
       timeInCurrentState: Date.now() - this.lastStateChange

@@ -6,12 +6,16 @@ let spotifyTokenExpiry = 0;
 import { CircuitBreakerRegistry } from './circuitBreaker.ts';
 import { globalCache } from './cache.ts';
 import { logger } from './logger.ts';
-import { withRetry, withRateLimitedRetry, wait, getRetryDelayFromHeaders } from './retry.ts';
+import { withRetry, withRateLimitedRetry, wait, getRetryDelayFromHeaders, ErrorCategory, categorizeError } from './retry.ts';
 import { getEnvConfig } from './dbHelpers.ts';
 
 // Create a logger instance specifically for Spotify API
 const spotifyLogger = logger.child({ service: 'SpotifyAPI' });
 const env = getEnvConfig();
+
+// Track concurrency for backpressure control
+let concurrentRequests = 0;
+const MAX_CONCURRENT = 2; // Maximum concurrent requests to Spotify API
 
 /** Get a valid Spotify access token via Client Credentials Flow */
 async function refreshSpotifyToken(): Promise<void> {
@@ -24,14 +28,18 @@ async function refreshSpotifyToken(): Promise<void> {
   const circuit = CircuitBreakerRegistry.getOrCreate({
     name: 'spotify-token-refresh',
     failureThreshold: 3,
-    resetTimeoutMs: 60000 // 1 minute
+    resetTimeoutMs: 60 * 60 * 1000, // 1 hour
+    halfOpenSuccessThreshold: 1
   });
   
   await circuit.fire(async () => {
     spotifyLogger.debug('Refreshing Spotify access token');
     
-    const resp = await withRetry(async () => {
-      const response = await fetch(SPOTIFY_TOKEN_URL, {
+    let response; // FIXED: Properly declare the response variable before using it
+    
+    response = await withRetry(async () => {
+      // Use controlledFetch to respect backpressure
+      return await controlledFetch(SPOTIFY_TOKEN_URL, {
         method: 'POST',
         headers: { 
           'Authorization': `Basic ${creds}`, 
@@ -39,27 +47,20 @@ async function refreshSpotifyToken(): Promise<void> {
         },
         body: 'grant_type=client_credentials',
       });
-      
-      if (!resp.ok) {
-        const errorText = await resp.text();
-        const error = new Error(`Failed to refresh Spotify token: ${resp.status} ${resp.statusText}. Details: ${errorText}`);
-        (error as any).status = resp.status;
-        (error as any).headers = resp.headers;
-        throw error;
-      }
-      
-      return response;
     }, {
       maxAttempts: 5,
-      initialDelayMs: 1000
+      initialDelayMs: 1000,
+      retryableErrorPredicate: (error) => {
+        return categorizeError(error) !== ErrorCategory.PERMANENT;
+      }
     });
     
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      throw new Error(`Failed to refresh Spotify token: ${resp.status} ${resp.statusText}. Details: ${errorText}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to refresh Spotify token: ${response.status} ${response.statusText}. Details: ${errorText}`);
     }
     
-    const data = await resp.json();
+    const data = await response.json();
     spotifyAccessToken = data.access_token;
     // Refresh 1min early (or 10% of time if less than 10min)
     const refreshBuffer = Math.min(60000, data.expires_in * 100);
@@ -89,14 +90,23 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
   // Try to get from cache first, with a 10 min TTL for most Spotify data
   // This avoids hitting rate limits and speeds up responses
   return globalCache.getOrFetch<T>(cacheKey, async () => {
-    // Use circuit breaker for API calls
-    const circuit = CircuitBreakerRegistry.getOrCreate({
-      name: 'spotify-api',
-      failureThreshold: 5,
-      resetTimeoutMs: 30000 // 30 seconds
+    // Use specialized rate limit circuit breaker for Spotify API calls
+    const rateLimitCircuit = CircuitBreakerRegistry.getOrCreate({
+      name: 'spotify-rate-limit',
+      failureThreshold: 1, // Trip immediately on 429
+      resetTimeoutMs: 60 * 60 * 1000, // 1 hour default, but we'll use Retry-After when available
+      halfOpenSuccessThreshold: 1
     });
     
-    return circuit.fire(async () => {
+    // General API circuit breaker
+    const apiCircuit = CircuitBreakerRegistry.getOrCreate({
+      name: 'spotify-api',
+      failureThreshold: 3,
+      resetTimeoutMs: 60 * 60 * 1000, // 1 hour
+      halfOpenSuccessThreshold: 2
+    });
+    
+    return apiCircuit.fire(async () => {
       return withRateLimitedRetry(async () => {
         const token = await ensureToken();
         
@@ -105,7 +115,8 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
         const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
         
         try {
-          const res = await fetch(`https://api.spotify.com/v1/${path}`, {
+          // Use controlledFetch to implement backpressure
+          const res = await controlledFetch(`https://api.spotify.com/v1/${path}`, {
             headers: { 'Authorization': `Bearer ${token}` },
             signal: controller.signal
           });
@@ -115,9 +126,15 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
           if (res.status === 429) {
             // Rate limited - get retry-after header and wait
             const retryAfter = res.headers.get('Retry-After');
-            const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
+            const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 30000;
             
-            contextLogger.warn(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`);
+            contextLogger.warn(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`, {
+              retryAfter,
+              path
+            });
+            
+            // Let the specialized rate limit circuit handle this
+            await rateLimitCircuit.recordFailure(res);
             
             // Let the retry mechanism handle this
             const error = new Error(`Spotify API rate limited`);
@@ -150,7 +167,9 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
       }, 'spotify-api', {
         maxAttempts: retries,
         initialDelayMs: 2000,
-        maxDelayMs: 30000
+        maxDelayMs: 30000,
+        factor: 1.5,
+        jitter: true
       });
     });
   }, 600000); // 10 minute cache TTL for Spotify data
@@ -217,23 +236,11 @@ export async function getTrackDetails(trackId: string): Promise<any> {
   return spotifyApi<any>(`tracks/${trackId}`);
 }
 
-// Enhanced wait function with backpressure control
-let concurrentRequests = 0;
-const MAX_CONCURRENT = 10; // Maximum concurrent requests
-
-export async function wait(ms: number): Promise<void> {
-  // If we're at max concurrency, add a bit more wait time
-  if (concurrentRequests >= MAX_CONCURRENT) {
-    ms += 200; // Add 200ms when under heavy load
-  }
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // Backpressure-aware fetch wrapper
 export async function controlledFetch(url: string, options?: RequestInit): Promise<Response> {
   // Wait until we're under concurrency limit
   while (concurrentRequests >= MAX_CONCURRENT) {
-    await wait(100);
+    await wait(200);
   }
   
   concurrentRequests++;
@@ -241,5 +248,7 @@ export async function controlledFetch(url: string, options?: RequestInit): Promi
     return await fetch(url, options);
   } finally {
     concurrentRequests--;
+    // Add small delay between requests to prevent rate limit issues
+    await wait(250);
   }
 }

@@ -26,6 +26,7 @@ interface RateLimitHeaders {
   'retry-after'?: string;
   'ratelimit-reset'?: string;
   'x-rate-limit-reset'?: string;
+  [key: string]: any;
 }
 
 // Helper to classify errors for retry decisions
@@ -43,15 +44,16 @@ export function categorizeError(error: any): ErrorCategory {
     error.name === 'AbortError' ||
     error.code === 'ECONNRESET' || 
     error.code === 'ECONNREFUSED' || 
-    error.code === 'ETIMEDOUT'
+    error.code === 'ETIMEDOUT' ||
+    error.message?.includes('fetch failed')
   ) {
     return ErrorCategory.CONNECTION;
   }
   
   // Check for typical transient errors
   if (
-    error.status >= 500 || 
-    error.statusCode >= 500 || 
+    (error.status >= 500 && error.status < 600) || 
+    (error.statusCode >= 500 && error.statusCode < 600) || 
     error.message?.includes('timeout') ||
     error.message?.includes('temporarily unavailable')
   ) {
@@ -69,12 +71,8 @@ export function categorizeError(error: any): ErrorCategory {
   
   // Permanent errors
   if (
-    error.status === 401 || 
-    error.status === 403 || 
-    error.status === 404 ||
-    error.statusCode === 401 || 
-    error.statusCode === 403 || 
-    error.statusCode === 404
+    [401, 403, 404].includes(error.status) || 
+    [401, 403, 404].includes(error.statusCode)
   ) {
     return ErrorCategory.PERMANENT;
   }
@@ -94,42 +92,52 @@ function defaultRetryPredicate(error: any): boolean {
 export function getRetryDelayFromHeaders(headers?: Headers | RateLimitHeaders): number | null {
   if (!headers) return null;
   
-  const retryAfter = headers['retry-after'] || 
-                     headers.get?.('retry-after') || 
-                     headers['ratelimit-reset'] ||
-                     headers.get?.('ratelimit-reset') ||
-                     headers['x-rate-limit-reset'] ||
-                     headers.get?.('x-rate-limit-reset');
+  // Handle both Headers object and plain objects
+  const getHeaderValue = (name: string): string | null => {
+    if (headers instanceof Headers) {
+      return headers.get(name);
+    } else {
+      return (headers as RateLimitHeaders)[name] || null;
+    }
+  };
+  
+  // Try multiple header formats
+  const retryAfter = getHeaderValue('retry-after') || 
+                    getHeaderValue('Retry-After') || 
+                    getHeaderValue('ratelimit-reset') ||
+                    getHeaderValue('x-rate-limit-reset');
                      
   if (!retryAfter) return null;
   
-  // Check if it's a timestamp or a delay in seconds
-  if (/^\d+$/.test(retryAfter)) {
-    const value = parseInt(retryAfter, 10);
-    
-    // If it's a Unix timestamp (usually > 1,000,000), convert to delay
-    if (value > 1000000) {
-      return Math.max(0, value * 1000 - Date.now());
+  try {
+    // Check if it's a timestamp or a delay in seconds
+    if (/^\d+$/.test(retryAfter)) {
+      const value = parseInt(retryAfter, 10);
+      
+      // If it's a Unix timestamp (usually > 1,000,000), convert to delay
+      if (value > 1000000) {
+        return Math.max(0, value * 1000 - Date.now());
+      }
+      
+      // Otherwise, it's a delay in seconds
+      return value * 1000;
     }
     
-    // Otherwise, it's a delay in seconds
-    return value * 1000;
-  }
-  
-  // Try to parse HTTP date format
-  try {
+    // Try to parse HTTP date format
     const date = new Date(retryAfter);
     if (!isNaN(date.getTime())) {
       return Math.max(0, date.getTime() - Date.now());
     }
   } catch (err) {
     // Ignore parsing errors
+    logger.warn(`Failed to parse Retry-After header: ${retryAfter}`, { error: String(err) });
   }
   
-  return null;
+  // Return reasonable default if parsing fails
+  return 30000; // 30 seconds default
 }
 
-// Calculate retry delay with exponential backoff and optional jitter
+// Calculate retry delay with exponential backoff and jitter
 function calculateRetryDelay(
   attempt: number,
   initialDelay: number,
@@ -199,10 +207,12 @@ export async function withRetry<T>(
         headers
       );
       
-      // Log retry attempt
+      // Log retry attempt with category information
+      const errorCategory = categorizeError(error);
       logger.warn(`Retry attempt ${attempt}/${maxAttempts} after ${delay}ms delay`, { 
         error: error.message,
-        category: ErrorCategory[categorizeError(error)]
+        category: ErrorCategory[errorCategory],
+        statusCode: error.status || error.statusCode
       });
       
       // Call onRetry callback if provided
@@ -234,10 +244,17 @@ export async function withRateLimitedRetry<T>(
     jitter: true,
     ...options,
     onRetry: (attempt, delay, error) => {
-      contextLogger.warn(`Rate limit retry for ${resourceName}`, {
+      // Enhanced logging for rate limit retries
+      const category = categorizeError(error);
+      const isRateLimit = category === ErrorCategory.RATE_LIMIT;
+      
+      contextLogger.warn(`${isRateLimit ? 'Rate limit' : 'Error'} retry for ${resourceName}`, {
         attempt,
         delay,
-        error: error.message
+        isRateLimit,
+        error: error.message,
+        status: error.status || error.statusCode,
+        headers: error.headers ? JSON.stringify(Object.fromEntries(error.headers.entries())) : undefined
       });
       
       if (options.onRetry) {
@@ -245,4 +262,19 @@ export async function withRateLimitedRetry<T>(
       }
     }
   });
+}
+
+// Enhanced wait function with backpressure control
+export async function waitForBackpressure(concurrentRequests: number, maxConcurrent: number, baseDelayMs = 200): Promise<void> {
+  if (concurrentRequests >= maxConcurrent) {
+    // Add exponential delay based on how far over limit we are
+    const overLimit = concurrentRequests - maxConcurrent + 1;
+    const delayMs = baseDelayMs * Math.pow(1.5, overLimit);
+    
+    // Add jitter
+    const jitterFactor = 0.2;
+    const jitteredDelay = delayMs * (1 - jitterFactor + (Math.random() * jitterFactor * 2));
+    
+    await wait(jitteredDelay);
+  }
 }

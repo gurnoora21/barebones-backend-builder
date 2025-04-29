@@ -12,6 +12,8 @@ interface LogContext {
   worker?: string;
   operation?: string;
   traceId?: string;
+  component?: string;
+  service?: string;
   [key: string]: any;
 }
 
@@ -56,15 +58,32 @@ export class Logger {
     this.log(LogLevel.WARN, message, data);
   }
   
-  error(message: string, error?: Error, data?: any) {
-    const errorData = error ? {
-      error: {
-        message: error.message,
-        name: error.name,
-        stack: error.stack
-      },
-      ...data
-    } : data;
+  error(message: string, error?: Error | any, data?: any) {
+    let errorData;
+    
+    if (error) {
+      errorData = {
+        error: {
+          message: error.message || String(error),
+          name: error.name || 'Error',
+          stack: error.stack || new Error().stack,
+          status: error.status || error.statusCode,
+          category: error.category || 'unknown'
+        },
+        ...data
+      };
+      
+      // Include any additional properties from the error
+      if (typeof error === 'object') {
+        for (const key of Object.keys(error)) {
+          if (!['message', 'name', 'stack'].includes(key) && typeof error[key] !== 'function') {
+            errorData.error[key] = error[key];
+          }
+        }
+      }
+    } else {
+      errorData = data;
+    }
     
     this.log(LogLevel.ERROR, message, errorData);
   }
@@ -81,13 +100,23 @@ export class Logger {
   setLevel(level: LogLevel) {
     this.minLevel = level;
   }
+  
+  // Get the current context
+  getContext(): LogContext {
+    return { ...this.context };
+  }
+  
+  // Clear all context
+  clearContext(): void {
+    this.context = {};
+  }
 }
 
 // Create a default logger
 export const logger = new Logger();
 
-// Generate a random trace ID
+// Generate a random trace ID with improved format
 export function generateTraceId(): string {
-  return Math.random().toString(36).substring(2, 15) + 
-         Math.random().toString(36).substring(2, 15);
+  const randomPart = () => Math.random().toString(36).substring(2, 15);
+  return randomPart() + randomPart();
 }
