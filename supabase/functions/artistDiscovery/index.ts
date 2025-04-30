@@ -15,7 +15,8 @@ const corsHeaders = {
 
 class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
   constructor() {
-    super('artist_discovery', 60);
+    // Increase visibility timeout from 60 to 120 seconds
+    super('artist_discovery', 120);
   }
 
   protected async process(msg: ArtistDiscoveryMsg): Promise<void> {
@@ -56,8 +57,8 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
     }
 
     try {
-      // Fetch additional artist details from Spotify
-      const artistDetails = await spotifyApi<any>(`artists/${artistId}`);
+      // Fetch additional artist details from Spotify with shorter timeout
+      const artistDetails = await spotifyApi<any>(`artists/${artistId}`, { timeout: 25000 });
       
       // Extract image URL from artist details
       const imageUrl = artistDetails.images?.[0]?.url || null;

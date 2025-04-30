@@ -887,6 +887,14 @@ export type Database = {
         Args: { queue_name: string; msg_id: number }
         Returns: boolean
       }
+      pgmq_drop_and_recreate_queue: {
+        Args: { queue_name: string }
+        Returns: undefined
+      }
+      pgmq_purge_queue: {
+        Args: { queue_name: string }
+        Returns: undefined
+      }
       pgmq_read: {
         Args: {
           queue_name: string

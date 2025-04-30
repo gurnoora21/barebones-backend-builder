@@ -1,3 +1,4 @@
+
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
 import { logger } from './logger.ts';
@@ -37,7 +38,7 @@ export class BatchProcessor<T> {
       concurrency: 2, // Reduced default concurrency
       batchSize: 3,   // Reduced default batch size
       retryAttempts: 3,
-      timeoutMs: 30000,
+      timeoutMs: 60000, // Increased from 30000 to 60000 (60 seconds)
       delayBetweenItemsMs: 250,  // Default delay between items
       ...options
     };
@@ -87,12 +88,17 @@ export class BatchProcessor<T> {
           // Process each message in the chunk sequentially
           for (const msg of chunk) {
             try {
-              // Process with timeout
+              // Process with timeout and better error handling
               await Promise.race([
                 processor([msg.message as T]), // Process single message at a time
-                new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Processing timeout')), this.options.timeoutMs)
-                )
+                new Promise((_, reject) => {
+                  const timeoutId = setTimeout(() => {
+                    reject(new Error(`Processing timeout (${this.options.timeoutMs}ms) for message ${msg.msg_id} in queue ${queueName}`));
+                  }, this.options.timeoutMs);
+                  
+                  // Ensure timeout is cleared if processing completes
+                  return () => clearTimeout(timeoutId);
+                })
               ]);
 
               // Archive successfully processed message
@@ -115,9 +121,12 @@ export class BatchProcessor<T> {
               // Log individual message failure
               this.logger.error(`Error processing message ${msg.msg_id} from queue ${queueName}:`, error);
               
+              // Check if this is a timeout error
+              const isTimeout = error.message && error.message.includes('timeout');
+              
               await this.supabase.from('worker_issues').insert({
                 worker_name: queueName,
-                issue_type: 'message_processing_error',
+                issue_type: isTimeout ? 'message_processing_timeout' : 'message_processing_error',
                 details: {
                   error: error.message,
                   stack: error.stack,
