@@ -1,7 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.38.4";
-import { Database } from "../types.ts";
+import { CircuitBreakerRegistry } from "../lib/circuitBreaker.ts";
 import { logger } from "../lib/logger.ts";
 
 const corsHeaders = {
@@ -12,83 +12,109 @@ const corsHeaders = {
 serve(async (req: Request) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders
+    });
   }
 
   try {
     // Get request body
-    const body = await req.json().catch(() => ({}));
-    const { circuitName } = body;
-
-    // Validate input
-    if (!circuitName) {
-      return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: "Circuit name is required" 
-        }),
-        { 
-          status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
+    let params = {};
+    try {
+      params = await req.json();
+    } catch (error) {
+      params = {};
     }
 
-    // Initialize Supabase client
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-    const supabase = createClient<Database>(supabaseUrl, supabaseKey);
+    const { circuitName } = params;
     
-    // Reset the circuit breaker in the database
+    // Create Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    
+    // Set up circuit breaker registry with supabase client
+    CircuitBreakerRegistry.setSupabaseClient(supabase);
+    
+    // Load existing circuit breakers from storage
+    await CircuitBreakerRegistry.loadFromStorage();
+    
+    // Initialize logger
+    const resetLogger = logger.child({ 
+      operation: 'resetCircuitBreakers',
+      circuitName
+    });
+    
+    let result;
+    
+    if (circuitName) {
+      // Reset specific circuit
+      await CircuitBreakerRegistry.reset(circuitName);
+      result = { 
+        success: true, 
+        message: `Circuit ${circuitName} reset successfully`
+      };
+      resetLogger.info(`Circuit ${circuitName} manually reset`);
+    } else {
+      // Get all circuit statuses
+      const statuses = await CircuitBreakerRegistry.getAllStatuses();
+      
+      // Reset spotify related circuits if they've been open for more than 4 hours
+      const now = Date.now();
+      const MAX_OPEN_DURATION = 4 * 60 * 60 * 1000; // 4 hours
+      
+      const resetCircuits = [];
+      
+      for (const status of statuses) {
+        if (
+          status.name.startsWith('spotify') && 
+          status.state === 'open' &&
+          (now - status.lastStateChange) > MAX_OPEN_DURATION
+        ) {
+          await CircuitBreakerRegistry.reset(status.name);
+          resetCircuits.push(status.name);
+          resetLogger.info(`Auto-reset long-open circuit: ${status.name}`);
+        }
+      }
+      
+      // Get updated statuses after resets
+      const updatedStatuses = await CircuitBreakerRegistry.getAllStatuses();
+      
+      result = {
+        success: true,
+        resetCircuits,
+        statuses: updatedStatuses
+      };
+    }
+    
+    // Also update the database to record this operation
     await supabase
-      .from('circuit_breakers')
-      .update({
-        state: 'closed',
-        failure_count: 0,
-        success_count: 0,
-        last_state_change: new Date().toISOString()
-      })
-      .eq('name', circuitName);
-
-    // Log the reset event
-    await supabase
-      .from('circuit_breaker_events')
+      .from('worker_issues')
       .insert({
-        circuit_name: circuitName,
-        old_state: 'open',
-        new_state: 'closed',
-        failure_count: 0,
+        worker_name: 'circuit_breaker_monitor',
+        issue_type: 'circuit_breaker_reset',
         details: {
-          reset_by: 'admin',
-          reset_time: new Date().toISOString(),
-          reason: 'Manual reset via API'
+          ...result,
+          triggered_by: 'manual_reset',
+          timestamp: new Date().toISOString()
         }
       });
-
-    logger.info(`Circuit breaker ${circuitName} has been manually reset`);
-
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: `Circuit breaker ${circuitName} has been reset` 
-      }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
-    );
-  } catch (error) {
-    logger.error("Error resetting circuit breaker:", error);
     
-    return new Response(
-      JSON.stringify({ 
-        success: false, 
-        error: error.message 
-      }),
-      { 
-        status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
-    );
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+    
+  } catch (error) {
+    const errorResponse = {
+      error: error.message,
+      details: error.stack
+    };
+    
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
 });
