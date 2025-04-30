@@ -18,6 +18,10 @@ const env = getEnvConfig();
 let concurrentRequests = 0;
 const MAX_CONCURRENT = 2; // Maximum concurrent requests to Spotify API
 
+// Defaults for rate limit handling
+const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 60; // Default retry after 1 minute if no header
+const MAX_RATE_LIMIT_RETRY_SECONDS = 3600; // Cap retry delay to 1 hour max
+
 /** Get a valid Spotify access token via Client Credentials Flow */
 async function refreshSpotifyToken(): Promise<void> {
   const clientId = env.getRequired('SPOTIFY_CLIENT_ID');
@@ -81,6 +85,57 @@ async function ensureToken(): Promise<string> {
   return spotifyAccessToken!;
 }
 
+/**
+ * Validates a rate limit response from Spotify
+ * Returns true if it appears to be a legitimate rate limit
+ */
+function isValidRateLimitResponse(response: Response): boolean {
+  // Check for proper status code first
+  if (response.status !== 429) {
+    return false;
+  }
+  
+  // Validate the Retry-After header exists
+  const retryAfter = response.headers.get('Retry-After');
+  if (!retryAfter) {
+    spotifyLogger.warn('Got 429 status but no Retry-After header, suspicious', {
+      headers: Object.fromEntries(response.headers.entries())
+    });
+    return false;
+  }
+  
+  // Get the retry delay and make sure it's reasonable
+  const retryDelay = getRetryDelayFromHeaders(response.headers);
+  if (!retryDelay || retryDelay <= 0) {
+    spotifyLogger.warn('Got invalid Retry-After value', { retryAfter });
+    return false;
+  }
+  
+  // Cap the retry delay to a reasonable maximum
+  if (retryDelay > MAX_RATE_LIMIT_RETRY_SECONDS * 1000) {
+    spotifyLogger.warn(`Suspiciously long Retry-After value: ${retryDelay}ms, capping to ${MAX_RATE_LIMIT_RETRY_SECONDS}s`);
+    return true; // Still valid, but we'll cap the delay later
+  }
+  
+  return true;
+}
+
+/**
+ * Calculate an appropriate retry delay from headers with reasonable limits
+ */
+function getReasonableRetryDelay(headers: Headers): number {
+  // Get the suggested delay from the headers
+  const suggestedDelay = getRetryDelayFromHeaders(headers);
+  
+  // If no valid delay, use a default
+  if (!suggestedDelay || suggestedDelay <= 0) {
+    return DEFAULT_RATE_LIMIT_RETRY_SECONDS * 1000;
+  }
+  
+  // Cap the delay to a reasonable maximum
+  return Math.min(suggestedDelay, MAX_RATE_LIMIT_RETRY_SECONDS * 1000);
+}
+
 /** Call Spotify API with the proper token and retry logic */
 export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
   const contextLogger = spotifyLogger.child({ operation: path.split('?')[0] });
@@ -94,7 +149,7 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
     // Use specialized rate limit circuit breaker for Spotify API calls
     const rateLimitCircuit = CircuitBreakerRegistry.getOrCreate({
       name: 'spotify-rate-limit',
-      failureThreshold: 1, // Trip immediately on 429
+      failureThreshold: 3, // Increased from 1 to 3 to make it less aggressive
       resetTimeoutMs: 60 * 60 * 1000, // 1 hour default, but we'll use Retry-After when available
       halfOpenSuccessThreshold: 1
     });
@@ -102,8 +157,8 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
     // General API circuit breaker
     const apiCircuit = CircuitBreakerRegistry.getOrCreate({
       name: 'spotify-api',
-      failureThreshold: 3,
-      resetTimeoutMs: 60 * 60 * 1000, // 1 hour
+      failureThreshold: 5, // Increased from 3 to 5
+      resetTimeoutMs: 15 * 60 * 1000, // 15 minutes (reduced from 1 hour)
       halfOpenSuccessThreshold: 2
     });
     
@@ -125,23 +180,38 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
           clearTimeout(timeoutId);
           
           if (res.status === 429) {
-            // Rate limited - get retry-after header and wait
-            const retryAfter = res.headers.get('Retry-After');
-            const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 30000;
-            
-            contextLogger.warn(`Rate limited by Spotify, waiting for ${waitTime}ms before retry`, {
-              retryAfter,
-              path
-            });
-            
-            // Let the specialized rate limit circuit handle this
-            await rateLimitCircuit.recordFailure(res);
-            
-            // Let the retry mechanism handle this
-            const error = new Error(`Spotify API rate limited`);
-            (error as any).status = 429;
-            (error as any).headers = res.headers;
-            throw error;
+            // Validate the rate limit response
+            if (isValidRateLimitResponse(res)) {
+              // Get a reasonable retry delay
+              const retryDelay = getReasonableRetryDelay(res.headers);
+              
+              contextLogger.warn(`Rate limited by Spotify, waiting for ${retryDelay}ms before retry`, {
+                retryAfter: res.headers.get('Retry-After'),
+                path,
+                cappedDelay: retryDelay
+              });
+              
+              // Tell the rate limit circuit about this failure
+              await rateLimitCircuit.recordFailure(res, retryDelay); // Pass the capped delay
+              
+              // Let the retry mechanism handle this
+              const error = new Error(`Spotify API rate limited`);
+              (error as any).status = 429;
+              (error as any).headers = res.headers;
+              throw error;
+            } else {
+              // This looks like a suspicious rate limit response
+              contextLogger.warn('Received suspicious rate limit response, treating as regular error', {
+                path,
+                status: res.status,
+                headers: Object.fromEntries(res.headers.entries())
+              });
+              
+              // Treat as a regular error, not a rate limit
+              const error = new Error(`Suspicious rate limit response`);
+              (error as any).status = res.status;
+              throw error;
+            }
           }
           
           if (!res.ok) {
@@ -256,3 +326,4 @@ export async function controlledFetch(url: string, options?: RequestInit): Promi
 
 // Add export for wait function
 export { wait } from './retry.ts';
+

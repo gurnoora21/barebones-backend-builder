@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { logger } from "./logger.ts";
 import { wait, getRetryDelayFromHeaders } from "./retry.ts";
@@ -114,18 +113,39 @@ export class CircuitBreaker {
   }
   
   // New method to record a failure from response for rate limits
-  async recordFailure(response: Response): Promise<void> {
+  async recordFailure(response: Response, customTimeoutMs?: number): Promise<void> {
     if (response.status === 429) {
-      const retryAfter = response.headers.get('Retry-After');
-      if (retryAfter) {
-        // Parse the retry delay from headers
-        const retryDelayMs = getRetryDelayFromHeaders(response.headers);
-        
-        if (retryDelayMs) {
-          // Set custom reset timeout based on Retry-After
-          this.customResetTimeout = retryDelayMs;
-          this.logger.info(`Setting custom reset timeout for ${this.options.name}: ${retryDelayMs}ms`);
+      let retryDelayMs: number | null = null;
+      
+      // Use provided custom timeout if available
+      if (customTimeoutMs !== undefined && customTimeoutMs > 0) {
+        retryDelayMs = customTimeoutMs;
+        this.logger.info(`Using provided custom reset timeout for ${this.options.name}: ${retryDelayMs}ms`);
+      } 
+      // Otherwise, try to parse from Retry-After header with validation
+      else {
+        const retryAfter = response.headers.get('Retry-After');
+        if (retryAfter) {
+          // Parse the retry delay from headers
+          retryDelayMs = getRetryDelayFromHeaders(response.headers);
+          
+          // Apply validation and capping to the delay
+          if (retryDelayMs) {
+            const MAX_ALLOWED_RETRY_DELAY = 60 * 60 * 1000; // 1 hour max
+            
+            if (retryDelayMs > MAX_ALLOWED_RETRY_DELAY) {
+              this.logger.warn(`Capping excessive retry delay ${retryDelayMs}ms to ${MAX_ALLOWED_RETRY_DELAY}ms`);
+              retryDelayMs = MAX_ALLOWED_RETRY_DELAY;
+            }
+            
+            this.logger.info(`Setting custom reset timeout for ${this.options.name}: ${retryDelayMs}ms`);
+          }
         }
+      }
+      
+      // Only set custom timeout if we have a valid value
+      if (retryDelayMs && retryDelayMs > 0) {
+        this.customResetTimeout = retryDelayMs;
       }
     }
     
@@ -141,10 +161,30 @@ export class CircuitBreaker {
       (error.message && error.message.includes('rate limit'))
     );
     
-    if (
-      (this.state === CircuitState.CLOSED && this.failureCount >= this.options.failureThreshold) ||
-      (this.state === CircuitState.CLOSED && isRateLimitError && this.options.name.includes('rate-limit'))
-    ) {
+    // Log detailed information about failures
+    this.logger.debug(`Circuit ${this.options.name} failure #${this.failureCount}`, {
+      isRateLimitError,
+      threshold: this.options.failureThreshold,
+      state: this.state,
+      errorStatus: error?.status,
+      errorMessage: error?.message,
+      customTimeout: this.customResetTimeout
+    });
+    
+    // For rate limit circuits, be more conservative about opening
+    const shouldOpenCircuit = (
+      this.state === CircuitState.CLOSED && 
+      (
+        // Standard failure threshold for most circuits
+        (this.failureCount >= this.options.failureThreshold) ||
+        // Special case: rate-limit circuit with confirmed rate limit error
+        (isRateLimitError && 
+         this.options.name.includes('rate-limit') && 
+         this.failureCount >= this.options.failureThreshold)
+      )
+    );
+    
+    if (shouldOpenCircuit) {
       await this.changeState(CircuitState.OPEN);
       this.logger.warn(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
     } else if (this.state === CircuitState.HALF_OPEN) {
@@ -327,7 +367,7 @@ export class CircuitBreakerRegistry {
       } else if (circuitName === 'spotify-rate-limit') {
         // Special settings for rate limit circuit
         this.logger.info(`Creating spotify-rate-limit circuit breaker with special settings`);
-        options.failureThreshold = 1; // Trip immediately on 429
+        options.failureThreshold = 3; // Increased from 1 to 3 - less aggressive
         options.resetTimeoutMs = 60 * 60 * 1000; // 1 hour default, but we'll use Retry-After when available
         options.halfOpenSuccessThreshold = 1;
       }
