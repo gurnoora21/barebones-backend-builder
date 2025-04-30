@@ -1,4 +1,3 @@
-
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 let spotifyAccessToken: string | null = null;
 let spotifyTokenExpiry = 0;
@@ -252,3 +251,6 @@ export async function controlledFetch(url: string, options?: RequestInit): Promi
     await wait(250);
   }
 }
+
+// Add export for wait function
+export { wait } from './retry.ts';

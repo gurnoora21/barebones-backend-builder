@@ -316,7 +316,22 @@ export class CircuitBreakerRegistry {
     const circuitName = options.name;
     
     if (!this.circuits.has(circuitName)) {
-      this.logger.debug(`Creating new circuit breaker: ${circuitName}`);
+      // Update default values for spotify-api circuit breaker
+      if (circuitName === 'spotify-api') {
+        // Adjust settings for more resilience
+        this.logger.info(`Creating spotify-api circuit breaker with tuned settings`);
+        options.failureThreshold = 5; // Increased from 3 to 5
+        options.resetTimeoutMs = 15 * 60 * 1000; // 15 minutes instead of 1 hour
+        options.halfOpenSuccessThreshold = 1; // Reduced from 2 to 1
+      } else if (circuitName === 'spotify-rate-limit') {
+        // Special settings for rate limit circuit
+        this.logger.info(`Creating spotify-rate-limit circuit breaker with special settings`);
+        options.failureThreshold = 1; // Trip immediately on 429
+        options.resetTimeoutMs = 60 * 60 * 1000; // 1 hour default, but we'll use Retry-After when available
+        options.halfOpenSuccessThreshold = 1;
+      }
+      
+      this.logger.debug(`Creating new circuit breaker: ${circuitName}`, options);
       const circuit = new CircuitBreaker(options, this.supabaseClient);
       this.circuits.set(circuitName, circuit);
     }
