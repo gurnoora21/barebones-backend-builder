@@ -16,6 +16,8 @@ const corsHeaders = {
 class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
   constructor() {
     super('album_discovery', 120);
+    // Reduce batch size from default to 2
+    this.batchProcessor.batchSize = 2;
   }
 
   private formatReleaseDate(spotifyReleaseDate: string): string | null {
@@ -60,6 +62,9 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       
       for (const album of albums.items) {
         try {
+          // Add a delay between each album processing to reduce API pressure
+          await wait(300); // 300ms delay between album processing
+          
           // Fetch full album details to get high-quality images
           const fullAlbumDetails = await spotifyApi<any>(`albums/${album.id}`);
           const coverUrl = fullAlbumDetails.images?.[0]?.url || null;
@@ -110,6 +115,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           console.log(`Enqueued track discovery for album: ${album.name}`);
           validAlbumsCount++;
           
+          // Additional wait to respect rate limits
           await wait(200);
         } catch (albumError) {
           console.error(`Error processing album ${album.name}:`, albumError);
@@ -120,6 +126,8 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       
       if (albums.items.length > 0 && offset + albums.items.length < albums.total) {
         const newOffset = offset + albums.items.length;
+        // Add a longer delay before enqueueing the next page to reduce overall throughput
+        await wait(1000);
         await this.enqueue('album_discovery', { artistId, offset: newOffset });
         console.log(`Enqueued next page of albums for artist ${artistId} with offset ${newOffset}`);
       } else {
