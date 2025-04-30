@@ -32,6 +32,27 @@ interface Producer {
   metadata?: any;
 }
 
+interface ProducerRecord {
+  id?: string;
+  name: string;
+  normalized_name: string;
+  image_url: string | null;
+  metadata: {
+    source: string;
+    roles: string[];
+    external_ids?: string[];
+    discovery_timestamp: string;
+    [key: string]: any;
+  };
+}
+
+interface TrackProducerRelation {
+  track_id: string;
+  producer_id: string;
+  confidence: number;
+  source: string;
+}
+
 class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg> {
   private geniusClient;
   private workerLogger = logger.child({ worker: 'ProducerIdentificationWorker' });
@@ -55,85 +76,138 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
   }
   
   /**
-   * Get or create a producer record
+   * Get or create producers in batch
    */
-  private async getOrCreateProducer(producer: Producer): Promise<string> {
+  private async getOrCreateProducers(producers: Producer[]): Promise<Map<string, string>> {
+    if (producers.length === 0) {
+      return new Map();
+    }
+    
     const contextLogger = this.workerLogger.child({
-      operation: 'getOrCreateProducer',
-      producerName: producer.name,
-      source: producer.source
+      operation: 'getOrCreateProducers',
+      count: producers.length
     });
     
     const dbHelpers = createDbTransactionHelpers(this.supabase as SupabaseClient<Database>);
+    const normalizedNameToProducer = new Map<string, Producer>();
+    const normalizedNames: string[] = [];
     
-    return dbHelpers.withDbRetry(async () => {
-      // First check if producer exists
-      const { data: existingProducer } = await this.supabase
-        .from('producers')
-        .select('id, metadata, image_url')
-        .eq('normalized_name', producer.normalizedName)
-        .maybeSingle();
-      
-      if (existingProducer) {
-        contextLogger.debug(`Producer ${producer.name} found in database with id ${existingProducer.id}`);
-        
-        // Update existing producer metadata with new information if available
-        if (producer.role === 'producer' || producer.role === 'writer') {
-          const currentMetadata = existingProducer.metadata as any || {};
-          
-          // Only update image if we don't already have one
-          const imageUrl = existingProducer.image_url || producer.image_url;
-          
-          // Merge metadata carefully
-          const updatedMetadata = {
-            ...currentMetadata,
-            roles: [...new Set([...(currentMetadata.roles || []), producer.role])],
-            sources: [...new Set([...(currentMetadata.sources || []), producer.source])],
-            ...(producer.metadata || {})
-          };
-          
-          await this.supabase
-            .from('producers')
-            .update({ 
-              metadata: updatedMetadata,
-              image_url: imageUrl
-            })
-            .eq('id', existingProducer.id);
-            
-          contextLogger.debug(`Updated producer ${producer.name} metadata`);
-        }
-        
-        return existingProducer.id;
-      } else {
-        // Create new producer
-        contextLogger.debug(`Creating new producer record for ${producer.name}`);
-        
-        const { data: newProducer, error: insertError } = await this.supabase
+    // Deduplicate by normalized name
+    for (const producer of producers) {
+      normalizedNameToProducer.set(producer.normalizedName, producer);
+      normalizedNames.push(producer.normalizedName);
+    }
+    
+    try {
+      return await dbHelpers.withDbRetry(async () => {
+        // First check which producers already exist
+        const { data: existingProducers, error } = await this.supabase
           .from('producers')
-          .insert({
-            name: producer.name,
-            normalized_name: producer.normalizedName,
-            image_url: producer.image_url || null,
-            metadata: { 
-              source: producer.source,
-              roles: [producer.role],
-              external_ids: producer.external_id ? [producer.external_id] : [],
-              discovery_timestamp: new Date().toISOString(),
-              ...(producer.metadata || {})
-            }
-          })
-          .select('id')
-          .single();
-
-        if (insertError) {
-          contextLogger.error('Error inserting producer:', insertError);
-          throw insertError;
+          .select('id, name, normalized_name, metadata, image_url')
+          .in('normalized_name', normalizedNames);
+          
+        if (error) {
+          contextLogger.error('Error fetching existing producers:', error);
+          throw error;
         }
         
-        contextLogger.info(`Created new producer ${producer.name} with id ${newProducer.id}`);
-        return newProducer.id;
-      }
-    });
+        // Map of normalized name to producer id
+        const producerIdMap = new Map<string, string>();
+        
+        // Track which producers need to be updated
+        const producersToUpdate: { id: string; metadata: any; image_url: string | null }[] = [];
+        
+        // Add existing producers to the map and prepare updates
+        for (const existingProducer of (existingProducers || [])) {
+          producerIdMap.set(existingProducer.normalized_name, existingProducer.id);
+          
+          // Get the producer from our input set
+          const producer = normalizedNameToProducer.get(existingProducer.normalized_name);
+          if (producer && (producer.role === 'producer' || producer.role === 'writer')) {
+            // Update metadata with new information
+            const currentMetadata = existingProducer.metadata || {};
+            
+            // Only update image if we don't already have one
+            const imageUrl = existingProducer.image_url || producer.image_url;
+            
+            // Merge metadata carefully
+            const roles = [...new Set([...(currentMetadata.roles || []), producer.role])];
+            const sources = [...new Set([...(currentMetadata.sources || []), producer.source])];
+            const externalIds = [...new Set([
+              ...(currentMetadata.external_ids || []),
+              ...(producer.external_id ? [producer.external_id] : [])
+            ])];
+            
+            producersToUpdate.push({
+              id: existingProducer.id,
+              metadata: {
+                ...currentMetadata,
+                roles,
+                sources,
+                external_ids: externalIds,
+                ...(producer.metadata || {})
+              },
+              image_url: imageUrl
+            });
+          }
+          
+          // Remove from the map of producers to create
+          normalizedNameToProducer.delete(existingProducer.normalized_name);
+        }
+        
+        // Update existing producers in batch if needed
+        if (producersToUpdate.length > 0) {
+          const { error: updateError } = await this.supabase
+            .from('producers')
+            .upsert(producersToUpdate);
+            
+          if (updateError) {
+            contextLogger.error('Error updating producers:', updateError);
+          } else {
+            contextLogger.debug(`Updated ${producersToUpdate.length} existing producers`);
+          }
+        }
+        
+        // Prepare new producers to be created
+        const newProducers: ProducerRecord[] = Array.from(normalizedNameToProducer.values()).map(p => ({
+          name: p.name,
+          normalized_name: p.normalizedName,
+          image_url: p.image_url || null,
+          metadata: { 
+            source: p.source,
+            roles: [p.role],
+            external_ids: p.external_id ? [p.external_id] : [],
+            discovery_timestamp: new Date().toISOString(),
+            ...(p.metadata || {})
+          }
+        }));
+        
+        // Create new producers
+        if (newProducers.length > 0) {
+          const { data: createdProducers, error: insertError } = await this.supabase
+            .from('producers')
+            .insert(newProducers)
+            .select('id, normalized_name');
+
+          if (insertError) {
+            contextLogger.error('Error inserting producers:', insertError);
+            throw insertError;
+          }
+          
+          // Add new producers to the id map
+          for (const created of (createdProducers || [])) {
+            producerIdMap.set(created.normalized_name, created.id);
+          }
+          
+          contextLogger.info(`Created ${newProducers.length} new producers`);
+        }
+        
+        return producerIdMap;
+      });
+    } catch (error) {
+      contextLogger.error(`Failed to get or create producers:`, error);
+      return new Map();
+    }
   }
 
   protected async process(msg: ProducerIdentificationMsg): Promise<void> {
@@ -281,42 +355,69 @@ class ProducerIdentificationWorker extends PageWorker<ProducerIdentificationMsg>
         }
       }
       
-      contextLogger.debug(`Identified ${uniqueProducersByName.size} unique producers for track ${trackName}`);
+      const uniqueProducers = Array.from(uniqueProducersByName.values());
+      contextLogger.debug(`Identified ${uniqueProducers.length} unique producers for track ${trackName}`);
       
-      // Save each unique producer to the database
-      for (const producer of uniqueProducersByName.values()) {
-        try {
-          // Create or get producer record
-          const producerId = await this.getOrCreateProducer(producer);
-          
-          // Create track_producer relationship
-          const { error: relationError } = await withRetry(async () => {
-            return this.supabase
-              .from('track_producers')
-              .insert({
-                track_id: dbTrack.id,
-                producer_id: producerId,
-                confidence: producer.confidence,
-                source: producer.source
-              });
-          }, {
-            maxAttempts: 3,
-            initialDelayMs: 300
-          });
-
-          if (relationError) {
-            contextLogger.error('Error creating track_producer relationship:', relationError);
-            throw relationError;
-          }
-
-          await this.enqueue('social_enrichment', { 
-            producerName: producer.name 
-          });
-          
-          contextLogger.debug(`Enqueued social enrichment for ${producer.role || 'collaborator'}: ${producer.name}`);
-        } catch (producerError) {
-          contextLogger.error(`Error processing producer ${producer.name}:`, producerError);
+      if (uniqueProducers.length === 0) {
+        contextLogger.info(`No producers identified for track ${trackName}`);
+        return;
+      }
+      
+      // Get or create all producers in batch
+      const producerIdMap = await this.getOrCreateProducers(uniqueProducers);
+      
+      if (producerIdMap.size === 0) {
+        contextLogger.warn(`Failed to get producer IDs for track ${trackName}`);
+        return;
+      }
+      
+      // Create track_producer relationships in batch
+      const trackProducerRelations: TrackProducerRelation[] = [];
+      const socialEnrichmentQueue: string[] = [];
+      
+      for (const producer of uniqueProducers) {
+        const producerId = producerIdMap.get(producer.normalizedName);
+        if (!producerId) {
+          contextLogger.warn(`No producer ID found for ${producer.name}`);
+          continue;
         }
+        
+        trackProducerRelations.push({
+          track_id: dbTrack.id,
+          producer_id: producerId,
+          confidence: producer.confidence,
+          source: producer.source
+        });
+        
+        socialEnrichmentQueue.push(producer.name);
+      }
+      
+      // Insert all track-producer relationships at once
+      if (trackProducerRelations.length > 0) {
+        const { error: relationError } = await withRetry(async () => {
+          return this.supabase
+            .from('track_producers')
+            .upsert(trackProducerRelations);
+        }, {
+          maxAttempts: 3,
+          initialDelayMs: 300
+        });
+
+        if (relationError) {
+          contextLogger.error('Error creating track_producer relationships:', relationError);
+          throw relationError;
+        }
+        
+        contextLogger.info(`Created ${trackProducerRelations.length} track-producer relationships`);
+      }
+      
+      // Enqueue social enrichment tasks in batch
+      for (const producerName of socialEnrichmentQueue) {
+        await this.enqueue('social_enrichment', { 
+          producerName 
+        });
+        
+        contextLogger.debug(`Enqueued social enrichment for ${producerName}`);
       }
       
       contextLogger.info(`Finished processing collaborators and producers for track ${trackName}`);

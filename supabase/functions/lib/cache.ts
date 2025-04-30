@@ -1,5 +1,5 @@
 
-// Simple in-memory TTL cache for API responses
+// Simple in-memory TTL cache for API responses with automatic cleanup
 
 interface CacheEntry<T> {
   value: T;
@@ -8,6 +8,19 @@ interface CacheEntry<T> {
 
 export class MemoryCache {
   private cache: Map<string, CacheEntry<any>> = new Map();
+  private maxEntries: number = 2000; // Default max entries
+  private cleanupInterval: number | undefined;
+  
+  constructor(options?: { maxEntries?: number; cleanupIntervalMs?: number }) {
+    this.maxEntries = options?.maxEntries || 2000;
+    
+    // Set up automatic cleanup interval if specified
+    if (options?.cleanupIntervalMs) {
+      this.cleanupInterval = setInterval(() => {
+        this.removeExpiredEntries();
+      }, options.cleanupIntervalMs);
+    }
+  }
   
   // Get a cached item or fetch it using the provided function
   async getOrFetch<T>(
@@ -32,16 +45,18 @@ export class MemoryCache {
     const result = await fetchFn();
     
     // Store in cache
-    this.cache.set(key, {
-      value: result,
-      expires: now + ttlMs
-    });
+    this.set(key, result, ttlMs);
     
     return result;
   }
   
   // Manual set to cache
   set<T>(key: string, value: T, ttlMs: number = 60000): void {
+    // If cache is at max capacity, remove oldest items before adding new one
+    if (this.cache.size >= this.maxEntries) {
+      this.removeOldestEntries(Math.ceil(this.maxEntries * 0.1)); // Remove 10% of oldest entries
+    }
+    
     this.cache.set(key, {
       value,
       expires: Date.now() + ttlMs
@@ -91,7 +106,54 @@ export class MemoryCache {
     }
     return count;
   }
+  
+  // Remove all expired entries
+  removeExpiredEntries(): number {
+    const now = Date.now();
+    let removed = 0;
+    
+    for (const [key, entry] of this.cache.entries()) {
+      if (now > entry.expires) {
+        this.cache.delete(key);
+        removed++;
+      }
+    }
+    
+    return removed;
+  }
+  
+  // Remove oldest entries by access time
+  private removeOldestEntries(count: number): void {
+    if (count <= 0 || this.cache.size === 0) return;
+    
+    // Convert cache entries to array for sorting
+    const entries = Array.from(this.cache.entries());
+    
+    // Sort by expiration time (oldest first)
+    entries.sort((a, b) => a[1].expires - b[1].expires);
+    
+    // Delete the oldest entries
+    const toRemove = Math.min(count, entries.length);
+    for (let i = 0; i < toRemove; i++) {
+      this.cache.delete(entries[i][0]);
+    }
+  }
+  
+  // Get current cache size
+  get size(): number {
+    return this.cache.size;
+  }
+  
+  // Cleanup resources when no longer needed
+  dispose(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+  }
 }
 
-// Singleton instance for global use
-export const globalCache = new MemoryCache();
+// Singleton instance for global use with automatic cleanup every 5 minutes
+export const globalCache = new MemoryCache({ 
+  maxEntries: 5000,
+  cleanupIntervalMs: 5 * 60 * 1000  // 5 minutes
+});

@@ -1,4 +1,3 @@
-
 import { CircuitBreakerRegistry } from './circuitBreaker.ts';
 import { globalCache } from './cache.ts';
 import { RateLimiter } from './rateLimiter.ts';
@@ -60,25 +59,197 @@ export interface GeniusSongResult {
 }
 
 /**
+ * Error categories for Genius API
+ */
+enum GeniusErrorCategory {
+  RateLimit = 'rate-limit',
+  Authentication = 'authentication',
+  NotFound = 'not-found',
+  ServerError = 'server-error',
+  NetworkError = 'network-error',
+  Unknown = 'unknown'
+}
+
+/**
+ * Custom error class for Genius API errors
+ */
+class GeniusApiError extends Error {
+  category: GeniusErrorCategory;
+  status?: number;
+  retryAfterMs?: number;
+  
+  constructor(message: string, category: GeniusErrorCategory, options: { status?: number, retryAfterMs?: number } = {}) {
+    super(message);
+    this.name = 'GeniusApiError';
+    this.category = category;
+    this.status = options.status;
+    this.retryAfterMs = options.retryAfterMs;
+  }
+}
+
+/**
  * Genius API client with resilience features
  * - Circuit breaker for API error handling
  * - Caching with TTL to avoid duplicate requests
  * - Rate limiting to respect the Genius API limits
  */
 export class GeniusClient {
-  private circuitBreaker;
+  private apiCircuitBreaker;
+  private rateLimitCircuitBreaker;
   private rateLimiter;
   private logger = logger.child({ service: 'GeniusAPI' });
-
+  private apiMaxRequestsPerMin = 120; // Genius API limit is approx 100-120 per minute
+  
   constructor(private token: string, private supabase: SupabaseClient<Database>) {
-    this.circuitBreaker = CircuitBreakerRegistry.getOrCreate({
+    // Circuit breaker for general API errors
+    this.apiCircuitBreaker = CircuitBreakerRegistry.getOrCreate({
       name: 'genius-api',
-      failureThreshold: 3,
-      resetTimeoutMs: 60000 // 1 minute
+      failureThreshold: 5,
+      resetTimeoutMs: 60000, // 1 minute
+      halfOpenMaxCalls: 1,
+      halfOpenSuccessThreshold: 1
+    });
+    
+    // Special circuit breaker for rate limiting
+    this.rateLimitCircuitBreaker = CircuitBreakerRegistry.getOrCreate({
+      name: 'genius-rate-limit',
+      failureThreshold: 1, // Trip immediately on rate limit
+      resetTimeoutMs: 60000, // Default 1 minute, will be overridden by Retry-After
+      halfOpenMaxCalls: 1,
+      halfOpenSuccessThreshold: 1,
+      onStateChange: (from, to, context) => {
+        this.logger.info(`Circuit genius-rate-limit state changed from ${from} to ${to}`);
+        
+        // If we're opening the circuit due to a rate limit, set custom timeout
+        if (to === 'open' && context?.retryAfterMs) {
+          this.logger.info(`Setting custom reset timeout for genius-rate-limit: ${context.retryAfterMs}ms`);
+          this.rateLimitCircuitBreaker.setCustomResetTimeout(context.retryAfterMs);
+        }
+      }
     });
     
     // Ensure we pass the supabase client to the rate limiter
     this.rateLimiter = new RateLimiter(supabase);
+  }
+  
+  /**
+   * Make a request to the Genius API with resilience patterns
+   */
+  private async geniusRequest<T>(path: string, options?: RequestInit): Promise<T> {
+    const url = `https://api.genius.com/${path}`;
+    const contextLogger = this.logger.child({ operation: path });
+    
+    try {
+      // Check rate limits before making request
+      const canProceed = await this.rateLimiter.canProceed({
+        key: 'genius-api',
+        maxRequests: this.apiMaxRequestsPerMin, 
+        windowMs: 60000 // 1 minute window
+      });
+
+      if (!canProceed) {
+        contextLogger.warn('Rate limiter prevented request to Genius API');
+        throw new GeniusApiError('Rate limit reached for Genius API', GeniusErrorCategory.RateLimit, {
+          retryAfterMs: 30000 // Default retry after 30s when rate limited locally
+        });
+      }
+      
+      // Check if rate limit circuit is open
+      await this.rateLimitCircuitBreaker.fire(async () => {
+        // If rate limit circuit is closed, proceed with main API circuit
+        return this.apiCircuitBreaker.fire(async () => {
+          contextLogger.debug(`Making Genius API request to ${path}`);
+          
+          const headers = {
+            Authorization: `Bearer ${this.token}`,
+            ...(options?.headers || {})
+          };
+          
+          const res = await fetch(url, {
+            ...options,
+            headers
+          });
+          
+          // Increment the rate limit counter for successful requests
+          await this.rateLimiter.increment('genius-api');
+          
+          // Handle different response statuses
+          if (!res.ok) {
+            let retryAfterMs: number | undefined;
+            
+            // Extract retry-after if present (convert from seconds to ms)
+            const retryAfter = res.headers.get('retry-after');
+            if (retryAfter) {
+              retryAfterMs = parseInt(retryAfter, 10) * 1000;
+            }
+            
+            const errorText = await res.text();
+            
+            // Categorize the error based on status code
+            let category = GeniusErrorCategory.Unknown;
+            switch (res.status) {
+              case 401:
+              case 403:
+                category = GeniusErrorCategory.Authentication;
+                break;
+              case 404:
+                category = GeniusErrorCategory.NotFound;
+                break;
+              case 429:
+                category = GeniusErrorCategory.RateLimit;
+                // Default retry-after if header is missing
+                retryAfterMs = retryAfterMs || 60000; 
+                // Update rate limiter when we get a 429
+                if (retryAfterMs) {
+                  await this.rateLimiter.reset('genius-api', Date.now() + retryAfterMs);
+                }
+                break;
+              case 500:
+              case 502:
+              case 503:
+              case 504:
+                category = GeniusErrorCategory.ServerError;
+                break;
+              default:
+                category = GeniusErrorCategory.Unknown;
+            }
+            
+            const error = new GeniusApiError(
+              `Genius API error: ${res.status}. Details: ${errorText}`, 
+              category,
+              { status: res.status, retryAfterMs }
+            );
+            
+            contextLogger.error(`Request failed: ${error.message}`, {
+              category: error.category,
+              status: res.status,
+              path
+            });
+            
+            // Pass the retry-after information to the circuit breaker
+            if (category === GeniusErrorCategory.RateLimit) {
+              throw { 
+                error, 
+                circuitBreakerContext: { retryAfterMs } 
+              };
+            }
+            
+            throw error;
+          }
+
+          const data = await res.json();
+          return data as T;
+        });
+      });
+    } catch (error) {
+      // Handle circuit breaker context wrapper
+      if (error && typeof error === 'object' && 'error' in error && 'circuitBreakerContext' in error) {
+        throw error.error;
+      }
+      
+      contextLogger.error(`Error in Genius API request to ${path}`, error);
+      throw error;
+    }
   }
 
   /**
@@ -93,54 +264,36 @@ export class GeniusClient {
     const contextLogger = this.logger.child({ operation: 'search', song, artist });
     
     try {
-      // Check rate limits before making request
-      const canProceed = await this.rateLimiter.canProceed({
-        key: 'genius-api',
-        maxRequests: 500, // Stay well under the 600 req/min limit
-        windowMs: 60000 // 1 minute window
-      });
-
-      if (!canProceed) {
-        contextLogger.warn('Rate limit exceeded for Genius API');
-        throw new Error('Rate limit exceeded for Genius API');
-      }
-
-      // Use cache with 7-day TTL for search results
+      // Use cache with 1-day TTL for search results (increased from 7-day for more frequent freshness)
       return globalCache.getOrFetch<GeniusSearchResult>(cacheKey, async () => {
-        // Use circuit breaker to handle API errors
-        return this.circuitBreaker.fire(async () => {
-          contextLogger.debug(`Making Genius API search request`, { query });
-          
-          // Use rate-limited retry with exponential backoff
-          return withRateLimitedRetry(async () => {
-            const res = await fetch(`${API}/search?q=${query}`, {
-              headers: { Authorization: `Bearer ${this.token}` }
-            });
-
-            if (!res.ok) {
-              const errorText = await res.text();
-              const error = new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
-              
-              // Add response info to the error for better handling
-              (error as any).status = res.status;
-              (error as any).headers = res.headers;
-              
-              contextLogger.error(`Search request failed`, error, {
-                status: res.status,
-                query
-              });
-              
-              throw error;
+        contextLogger.debug(`Making Genius API search request`, { query });
+        
+        // Use rate-limited retry with exponential backoff
+        return withRateLimitedRetry(async () => {
+          return await this.geniusRequest<GeniusSearchResult>(`search?q=${query}`);
+        }, 'genius-search', {
+          isRetryableError: (err) => {
+            if (err instanceof GeniusApiError) {
+              // Only retry on rate limits and server errors
+              return [
+                GeniusErrorCategory.RateLimit, 
+                GeniusErrorCategory.ServerError, 
+                GeniusErrorCategory.NetworkError
+              ].includes(err.category);
             }
-
-            const data = await res.json();
-            contextLogger.debug(`Search request successful`, {
-              hitCount: data.response?.hits?.length || 0
-            });
-            return data;
-          }, 'genius-search');
+            // Retry on network errors
+            return err instanceof TypeError || err.message?.includes('network');
+          },
+          getRetryDelayMs: (err, attempt) => {
+            if (err instanceof GeniusApiError && err.retryAfterMs) {
+              // Use the server-provided retry delay
+              return err.retryAfterMs;
+            }
+            // Default exponential backoff
+            return Math.min(2 ** attempt * 1000, 30000);
+          }
         });
-      }, 7 * 24 * 60 * 60 * 1000); // 7-day cache
+      }, 24 * 60 * 60 * 1000); // 1-day cache
     } catch (error) {
       contextLogger.error(`Error in Genius API search for "${query}"`, error);
       throw error;
@@ -161,57 +314,34 @@ export class GeniusClient {
     const contextLogger = this.logger.child({ operation: 'getSong', songId: id });
     
     try {
-      // Check rate limits before making request
-      const canProceed = await this.rateLimiter.canProceed({
-        key: 'genius-api',
-        maxRequests: 500, // Stay well under the 600 req/min limit
-        windowMs: 60000 // 1 minute window
-      });
-
-      if (!canProceed) {
-        contextLogger.warn('Rate limit exceeded for Genius API');
-        throw new Error('Rate limit exceeded for Genius API');
-      }
-
-      // Use cache with 30-day TTL for song details (unlikely to change)
+      // Use cache with 30-day TTL for song details (unchanged as these rarely change)
       return globalCache.getOrFetch<GeniusSongResult>(cacheKey, async () => {
-        // Use circuit breaker to handle API errors
-        return this.circuitBreaker.fire(async () => {
-          contextLogger.debug(`Making Genius API song request`, { songId: id });
-          
-          // Use rate-limited retry with exponential backoff
-          return withRateLimitedRetry(async () => {
-            const res = await fetch(`${API}/songs/${id}`, {
-              headers: { Authorization: `Bearer ${this.token}` }
-            });
-            
-            if (!res.ok) {
-              const errorText = await res.text();
-              const error = new Error(`Genius API error: ${res.status}. Details: ${errorText}`);
-              
-              // Add response info to the error for better handling
-              (error as any).status = res.status;
-              (error as any).headers = res.headers;
-              
-              contextLogger.error(`Song details request failed`, error, {
-                status: res.status,
-                songId: id
-              });
-              
-              throw error;
+        contextLogger.debug(`Making Genius API song request`, { songId: id });
+        
+        // Use rate-limited retry with exponential backoff
+        return withRateLimitedRetry(async () => {
+          return await this.geniusRequest<GeniusSongResult>(`songs/${id}`);
+        }, 'genius-song', {
+          isRetryableError: (err) => {
+            if (err instanceof GeniusApiError) {
+              // Only retry on rate limits and server errors
+              return [
+                GeniusErrorCategory.RateLimit, 
+                GeniusErrorCategory.ServerError, 
+                GeniusErrorCategory.NetworkError
+              ].includes(err.category);
             }
-
-            const data = await res.json();
-            
-            contextLogger.debug(`Song details request successful`, {
-              songId: id,
-              title: data.response?.song?.title,
-              producerCount: data.response?.song?.producer_artists?.length || 0,
-              writerCount: data.response?.song?.writer_artists?.length || 0
-            });
-            
-            return data;
-          }, 'genius-song');
+            // Retry on network errors
+            return err instanceof TypeError || err.message?.includes('network');
+          },
+          getRetryDelayMs: (err, attempt) => {
+            if (err instanceof GeniusApiError && err.retryAfterMs) {
+              // Use the server-provided retry delay
+              return err.retryAfterMs;
+            }
+            // Default exponential backoff
+            return Math.min(2 ** attempt * 1000, 30000);
+          }
         });
       }, 30 * 24 * 60 * 60 * 1000); // 30-day cache
     } catch (error) {

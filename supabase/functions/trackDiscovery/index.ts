@@ -15,6 +15,42 @@ interface TrackDiscoveryMsg {
   offset?: number;
 }
 
+interface Track {
+  id: string;
+  name: string;
+  duration_ms: number;
+  popularity: number;
+  preview_url: string | null;
+  disc_number: number;
+  track_number: number;
+  artists: Array<{ id: string; name: string }>;
+}
+
+interface TrackWithDetails extends Track {
+  normalizedName: string;
+}
+
+interface TrackInsertData {
+  spotify_id: string;
+  album_id: string;
+  name: string;
+  duration_ms: number;
+  popularity: number;
+  spotify_preview_url: string | null;
+  metadata: {
+    source: string;
+    disc_number: number;
+    track_number: number;
+    discovery_timestamp: string;
+  };
+}
+
+interface NormalizedTrackData {
+  normalized_name: string;
+  artist_id: string;
+  representative_track_id: string;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -22,6 +58,7 @@ const corsHeaders = {
 
 class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   private workerLogger = logger.child({ worker: 'TrackDiscoveryWorker' });
+  private batchSize = 10; // Process tracks in batches of this size
   
   constructor() {
     super('track_discovery', 60);
@@ -40,7 +77,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       .replace(/\s+/g, ' '); // Normalize whitespace
   }
 
-  private async isArtistPrimaryOnTrack(track: any, artistId: string): Promise<boolean> {
+  private async isArtistPrimaryOnTrack(track: Track, artistId: string): Promise<boolean> {
     if (track.artists && track.artists.length > 0) {
       const primaryArtistId = track.artists[0].id;
       return primaryArtistId === artistId;
@@ -55,51 +92,58 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     }
   }
 
-  private async checkTrackExists(normalizedName: string, artistUuid: string): Promise<boolean> {
+  private async checkExistingTracks(normalizedNames: string[], artistUuid: string): Promise<Set<string>> {
+    if (normalizedNames.length === 0) return new Set<string>();
+    
     const dbHelpers = createDbTransactionHelpers(this.supabase as SupabaseClient<Database>);
     
-    return dbHelpers.withDbRetry(async () => {
-      const { data, error } = await this.supabase
-        .from('normalized_tracks')
-        .select('id')
-        .eq('normalized_name', normalizedName)
-        .eq('artist_id', artistUuid)
-        .maybeSingle();
+    try {
+      return await dbHelpers.withDbRetry(async () => {
+        const { data, error } = await this.supabase
+          .from('normalized_tracks')
+          .select('normalized_name')
+          .eq('artist_id', artistUuid)
+          .in('normalized_name', normalizedNames);
 
-      if (error && error.code !== 'PGRST116') {  // Not a "no rows" error
-        this.workerLogger.error(`Error checking for existing track ${normalizedName}:`, error);
-        throw error;
-      }
-      
-      return !!data; // Return true if the track exists, false otherwise
-    });
+        if (error) {
+          this.workerLogger.error(`Error checking for existing tracks:`, error);
+          throw error;
+        }
+        
+        return new Set((data || []).map(row => row.normalized_name));
+      });
+    } catch (error) {
+      this.workerLogger.error(`Failed to check existing tracks:`, error);
+      return new Set<string>();
+    }
   }
   
   /**
-   * Create or update a track with proper transaction handling
+   * Create or update tracks in batches with proper transaction handling
    */
-  private async createTrack(
-    track: any, 
-    normalizedName: string, 
+  private async createTracks(
+    tracksWithDetails: TrackWithDetails[], 
     albumUuid: string, 
     artistUuid: string
-  ): Promise<string> {
+  ): Promise<Map<string, string>> {
+    if (tracksWithDetails.length === 0) return new Map();
+    
     const traceId = generateTraceId();
     const contextLogger = this.workerLogger.child({ 
-      operation: 'createTrack',
-      trackName: track.name,
+      operation: 'createTracks',
+      batchSize: tracksWithDetails.length,
       traceId
     });
     
     const dbHelpers = createDbTransactionHelpers(this.supabase as SupabaseClient<Database>);
     
-    return dbHelpers.withTransaction(async (tx) => {
-      // First insert the track
-      contextLogger.debug('Inserting new track');
-      
-      const { data: trackData, error: trackUpsertError } = await this.supabase
-        .from('tracks')
-        .upsert({
+    try {
+      return await dbHelpers.withTransaction(async (tx) => {
+        const trackIdMap = new Map<string, string>();
+        contextLogger.debug(`Processing batch of ${tracksWithDetails.length} tracks`);
+        
+        // 1. Prepare track data for insertion
+        const tracksToInsert: TrackInsertData[] = tracksWithDetails.map(track => ({
           spotify_id: track.id,
           album_id: albumUuid,
           name: track.name,
@@ -112,40 +156,160 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
             track_number: track.track_number,
             discovery_timestamp: new Date().toISOString()
           }
-        })
-        .select('id')
-        .single();
+        }));
+        
+        // 2. Insert tracks in a batch
+        const { data: trackData, error: trackInsertError } = await this.supabase
+          .from('tracks')
+          .upsert(tracksToInsert)
+          .select('id, spotify_id');
 
-      if (trackUpsertError) {
-        contextLogger.error('Error upserting track', trackUpsertError);
-        throw trackUpsertError;
-      }
-      
-      const trackId = trackData.id;
-      
-      // Next, create the normalized track entry
-      contextLogger.debug('Creating normalized track entry', { normalizedName });
-      
-      const { error: normalizedError } = await withRetry(async () => {
-        return this.supabase
-          .from('normalized_tracks')
-          .upsert({
-            normalized_name: normalizedName,
-            artist_id: artistUuid,
-            representative_track_id: track.id
-          });
-      }, {
-        maxAttempts: 3,
-        initialDelayMs: 200
+        if (trackInsertError) {
+          contextLogger.error('Error upserting tracks batch:', trackInsertError);
+          throw trackInsertError;
+        }
+        
+        // Map spotify_id to UUID for later use
+        (trackData || []).forEach(track => {
+          trackIdMap.set(track.spotify_id, track.id);
+        });
+        
+        // 3. Prepare normalized track data for insertion
+        const normalizedTracksToInsert: NormalizedTrackData[] = tracksWithDetails.map(track => ({
+          normalized_name: track.normalizedName,
+          artist_id: artistUuid,
+          representative_track_id: track.id
+        }));
+        
+        // 4. Insert normalized tracks in a batch
+        const { error: normalizedError } = await withRetry(async () => {
+          return this.supabase
+            .from('normalized_tracks')
+            .upsert(normalizedTracksToInsert);
+        }, {
+          maxAttempts: 3,
+          initialDelayMs: 200
+        });
+
+        if (normalizedError) {
+          contextLogger.error('Error upserting normalized tracks batch:', normalizedError);
+          throw normalizedError;
+        }
+        
+        return trackIdMap;
       });
-
-      if (normalizedError) {
-        contextLogger.error('Error upserting normalized track', normalizedError);
-        throw normalizedError;
+    } catch (error) {
+      contextLogger.error(`Error in batch track creation:`, error);
+      return new Map();
+    }
+  }
+  
+  /**
+   * Process tracks in batches to improve efficiency
+   */
+  private async processTracks(
+    tracks: Track[],
+    artistId: string,
+    artistUuid: string,
+    albumUuid: string,
+    albumId: string
+  ): Promise<{ validCount: number; filteredCount: number; duplicateCount: number }> {
+    const stats = {
+      validCount: 0,
+      filteredCount: 0,
+      duplicateCount: 0
+    };
+    
+    if (tracks.length === 0) return stats;
+    
+    const detailedTracks: TrackWithDetails[] = [];
+    const normalizedNames: string[] = [];
+    
+    // First prepare all tracks
+    for (const track of tracks) {
+      try {
+        const isPrimaryArtist = await this.isArtistPrimaryOnTrack(track, artistId);
+        
+        if (!isPrimaryArtist) {
+          this.workerLogger.debug(`Skipping track "${track.name}" as ${artistId} is not the primary artist`);
+          stats.filteredCount++;
+          continue;
+        }
+        
+        const normalizedName = this.normalizeTrackName(track.name);
+        normalizedNames.push(normalizedName);
+        
+        // Add to detailed tracks
+        detailedTracks.push({
+          ...track,
+          normalizedName
+        });
+      } catch (error) {
+        this.workerLogger.error(`Error processing track ${track.name}:`, error);
+      }
+    }
+    
+    if (detailedTracks.length === 0) return stats;
+    
+    // Get existing tracks to filter out duplicates
+    const existingTracks = await this.checkExistingTracks(normalizedNames, artistUuid);
+    
+    // Filter out already existing tracks
+    const newTracks = detailedTracks.filter(track => {
+      const exists = existingTracks.has(track.normalizedName);
+      if (exists) stats.duplicateCount++;
+      return !exists;
+    });
+    
+    if (newTracks.length === 0) {
+      return stats;
+    }
+    
+    // Process in batches of batchSize
+    for (let i = 0; i < newTracks.length; i += this.batchSize) {
+      const batch = newTracks.slice(i, i + this.batchSize);
+      
+      // Get detailed information for each track in the batch
+      const detailedBatch = await Promise.all(batch.map(async track => {
+        try {
+          const trackDetails = await getTrackDetails(track.id);
+          return {
+            ...track,
+            popularity: trackDetails.popularity,
+            preview_url: trackDetails.preview_url
+          };
+        } catch (error) {
+          this.workerLogger.error(`Error fetching details for track ${track.id}:`, error);
+          // Return original track if can't get details
+          return track;
+        }
+      }));
+      
+      // Create tracks and process results
+      const trackUuids = await this.createTracks(detailedBatch, albumUuid, artistUuid);
+      
+      // Enqueue producer identification for successfully created tracks
+      for (const track of detailedBatch) {
+        if (trackUuids.has(track.id)) {
+          await this.enqueue('producer_identification', {
+            trackId: track.id,
+            trackName: track.name,
+            albumId,
+            artistId
+          });
+          
+          this.workerLogger.debug(`Enqueued producer identification for track "${track.name}"`);
+          stats.validCount++;
+        }
       }
       
-      return trackId;
-    });
+      // Add a slight throttle between batches to avoid rate limits
+      if (i + this.batchSize < newTracks.length) {
+        await wait(1000);
+      }
+    }
+    
+    return stats;
   }
 
   protected async process(msg: TrackDiscoveryMsg): Promise<void> {
@@ -187,71 +351,23 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         throw new Error(`Album ${albumId} not found in database`);
       }
       
-      let validTracksCount = 0;
-      let filteredTracksCount = 0;
-      let duplicateTracksCount = 0;
-      
-      for (const track of tracks.items) {
-        const trackLogger = contextLogger.child({ trackName: track.name });
-        
-        try {
-          const isPrimaryArtist = track.artists && 
-                                   track.artists.length > 0 && 
-                                   track.artists[0].id === artistId;
-          
-          if (!isPrimaryArtist) {
-            trackLogger.debug(`Skipping track as ${artistId} is not the primary artist`);
-            filteredTracksCount++;
-            continue;
-          }
-          
-          const normalizedName = this.normalizeTrackName(track.name);
-          trackLogger.debug(`Normalized track name: "${normalizedName}"`);
-          
-          // Check if this track already exists (by normalized name + artist)
-          const trackExists = await this.checkTrackExists(normalizedName, artistUuid);
-          if (trackExists) {
-            trackLogger.debug(`Skipping duplicate track (normalized: ${normalizedName})`);
-            duplicateTracksCount++;
-            continue;
-          }
-
-          // Get more detailed track information
-          const trackDetails = await getTrackDetails(track.id);
-          
-          // Use transaction to ensure both track and normalized track are created
-          await this.createTrack(
-            { ...track, popularity: trackDetails.popularity, preview_url: trackDetails.preview_url }, 
-            normalizedName, 
-            album.id, 
-            artistUuid
-          );
-          
-          // Enqueue producer identification
-          await this.enqueue('producer_identification', {
-            trackId: track.id,
-            trackName: track.name,
-            albumId,
-            artistId
-          });
-          
-          trackLogger.info(`Processed track and enqueued producer identification`);
-          
-          validTracksCount++;
-          await wait(200); // Slight throttle to avoid rate limits
-        } catch (trackError) {
-          trackLogger.error(`Error processing track:`, trackError);
-        }
-      }
+      // Process tracks in batches
+      const stats = await this.processTracks(
+        tracks.items, 
+        artistId, 
+        artistUuid, 
+        album.id,
+        albumId
+      );
       
       contextLogger.info(`Processed ${tracks.items.length} tracks`, { 
-        valid: validTracksCount, 
-        filtered: filteredTracksCount, 
-        duplicates: duplicateTracksCount 
+        valid: stats.validCount, 
+        filtered: stats.filteredCount, 
+        duplicates: stats.duplicateCount 
       });
       
       // If we have more tracks to process, enqueue the next batch
-      if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && validTracksCount > 0) {
+      if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && stats.validCount > 0) {
         const newOffset = offset + tracks.items.length;
         await this.enqueue('track_discovery', {
           albumId,
