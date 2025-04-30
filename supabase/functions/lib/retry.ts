@@ -195,8 +195,10 @@ export async function withRetry<T>(
       if (errorCategory === ErrorCategory.RATE_LIMIT && error.headers) {
         const retryAfterMs = getRetryDelayFromHeaders(error.headers);
         if (retryAfterMs && retryAfterMs > 0) {
-          delay = retryAfterMs;
-          retryLogger.info(`Using Retry-After header value: ${delay}ms`);
+          // Cap retry delay to 1 hour maximum
+          const MAX_RETRY_DELAY = 60 * 60 * 1000; // 1 hour
+          delay = Math.min(retryAfterMs, MAX_RETRY_DELAY);
+          retryLogger.info(`Using capped Retry-After header value: ${delay}ms`);
         }
       }
       
@@ -255,11 +257,17 @@ export async function withRateLimitedRetry<T>(
       const isRateLimit = errorCategory === ErrorCategory.RATE_LIMIT;
       let delay = calculateRetryDelay(attempt, rateLimitOptions);
       
-      // Get specific delay from headers for rate limit errors
+      // Get specific delay from headers for rate limit errors with proper capping
       if (isRateLimit && error.headers) {
         const retryAfterMs = getRetryDelayFromHeaders(error.headers);
         if (retryAfterMs && retryAfterMs > 0) {
-          delay = retryAfterMs;
+          // Cap retry delay to 1 hour maximum
+          const MAX_RETRY_DELAY = 60 * 60 * 1000; // 1 hour
+          delay = Math.min(retryAfterMs, MAX_RETRY_DELAY);
+          
+          if (retryAfterMs > MAX_RETRY_DELAY) {
+            retryLogger.warn(`Capping excessive retry delay ${retryAfterMs}ms to ${MAX_RETRY_DELAY}ms`);
+          }
         }
       }
       

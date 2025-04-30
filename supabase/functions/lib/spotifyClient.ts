@@ -1,5 +1,4 @@
 
-
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 let spotifyAccessToken: string | null = null;
 let spotifyTokenExpiry = 0;
@@ -16,7 +15,7 @@ const env = getEnvConfig();
 
 // Track concurrency for backpressure control
 let concurrentRequests = 0;
-const MAX_CONCURRENT = 2; // Maximum concurrent requests to Spotify API
+const MAX_CONCURRENT = 2; // Reduced from 5 to 2 to prevent rate limiting
 
 // Defaults for rate limit handling
 const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 60; // Default retry after 1 minute if no header
@@ -137,7 +136,7 @@ function getReasonableRetryDelay(headers: Headers): number {
 }
 
 /** Call Spotify API with the proper token and retry logic */
-export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
+export async function spotifyApi<T>(path: string, options: { timeout?: number } = {}, retries = 3): Promise<T> {
   const contextLogger = spotifyLogger.child({ operation: path.split('?')[0] });
   
   // Create a unique cache key for this request
@@ -157,7 +156,7 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
     // General API circuit breaker
     const apiCircuit = CircuitBreakerRegistry.getOrCreate({
       name: 'spotify-api',
-      failureThreshold: 5, // Increased from 3 to 5
+      failureThreshold: 10, // Increased from 5 to 10 to prevent opening too easily
       resetTimeoutMs: 15 * 60 * 1000, // 15 minutes (reduced from 1 hour)
       halfOpenSuccessThreshold: 2
     });
@@ -168,7 +167,8 @@ export async function spotifyApi<T>(path: string, retries = 3): Promise<T> {
         
         // Set up a controller for timeout
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+        const timeoutMs = options.timeout || 10000; // Default 10s timeout
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         
         try {
           // Use controlledFetch to implement backpressure
@@ -272,7 +272,10 @@ export async function getArtistAlbums(artistId: string, offset = 0): Promise<any
   
   // Only get albums and singles where the artist is the primary artist
   // We'll filter further in the results to ensure they're truly primary artist releases
-  const albums = await spotifyApi<any>(`artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`);
+  const albums = await spotifyApi<any>(
+    `artists/${artistId}/albums?include_groups=album,single&limit=50&offset=${offset}`,
+    { timeout: 25000 } // Increased timeout for this operation
+  );
   
   if (albums && albums.items) {
     contextLogger.debug(`Retrieved ${albums.items.length} albums from Spotify`, {
@@ -300,11 +303,17 @@ export async function getArtistAlbums(artistId: string, offset = 0): Promise<any
 }
 
 export async function getAlbumTracks(albumId: string, offset = 0): Promise<any> {
-  return spotifyApi<any>(`albums/${albumId}/tracks?limit=50&offset=${offset}`);
+  return spotifyApi<any>(
+    `albums/${albumId}/tracks?limit=50&offset=${offset}`,
+    { timeout: 20000 } // Increased timeout for album track fetching
+  );
 }
 
 export async function getTrackDetails(trackId: string): Promise<any> {
-  return spotifyApi<any>(`tracks/${trackId}`);
+  return spotifyApi<any>(
+    `tracks/${trackId}`,
+    { timeout: 15000 } // Increased timeout for track details
+  );
 }
 
 // Backpressure-aware fetch wrapper
@@ -326,4 +335,3 @@ export async function controlledFetch(url: string, options?: RequestInit): Promi
 
 // Add export for wait function
 export { wait } from './retry.ts';
-

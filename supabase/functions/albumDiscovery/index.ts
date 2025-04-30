@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getArtistAlbums, spotifyApi, wait } from "../lib/spotifyClient.ts";
+import { logger } from "../lib/logger.ts";
 
 interface AlbumDiscoveryMsg {
   artistId: string;
@@ -14,6 +15,8 @@ const corsHeaders = {
 };
 
 class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
+  private workerLogger = logger.child({ worker: 'AlbumDiscoveryWorker' });
+  
   constructor() {
     super('album_discovery', 120);
     // Reduce batch size from default to 2
@@ -31,17 +34,17 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       return spotifyReleaseDate;
     }
     
-    console.log(`Unrecognized release date format: ${spotifyReleaseDate}`);
+    this.workerLogger.warn(`Unrecognized release date format: ${spotifyReleaseDate}`);
     return null;
   }
 
   protected async process(msg: AlbumDiscoveryMsg): Promise<void> {
     const { artistId, offset } = msg;
-    console.log(`Processing album discovery for artist ${artistId} with offset ${offset}`);
+    this.workerLogger.info(`Processing album discovery for artist ${artistId} with offset ${offset}`);
     
     try {
       const albums = await getArtistAlbums(artistId, offset);
-      console.log(`Found ${albums.items.length} albums for artist ${artistId} after primary artist filtering`);
+      this.workerLogger.info(`Found ${albums.items.length} albums for artist ${artistId} after primary artist filtering`);
 
       const { data: artist, error: artistError } = await this.supabase
         .from('artists')
@@ -50,7 +53,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
         .single();
 
       if (artistError) {
-        console.error(`Error finding artist ${artistId} in database:`, artistError);
+        this.workerLogger.error(`Error finding artist ${artistId} in database:`, artistError);
         throw artistError;
       }
 
@@ -60,13 +63,14 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       
       let validAlbumsCount = 0;
       
+      // Process albums with increased delays between each album
       for (const album of albums.items) {
         try {
           // Add a delay between each album processing to reduce API pressure
-          await wait(300); // 300ms delay between album processing
+          await wait(500); // Increased from 300ms to 500ms
           
           // Fetch full album details to get high-quality images
-          const fullAlbumDetails = await spotifyApi<any>(`albums/${album.id}`);
+          const fullAlbumDetails = await spotifyApi<any>(`albums/${album.id}`, { timeout: 20000 });
           const coverUrl = fullAlbumDetails.images?.[0]?.url || null;
           
           const formattedReleaseDate = this.formatReleaseDate(album.release_date);
@@ -78,7 +82,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             .single();
 
           if (selectError && selectError.code !== 'PGRST116') {
-            console.error(`Error checking for existing album ${album.id}:`, selectError);
+            this.workerLogger.error(`Error checking for existing album ${album.id}:`, selectError);
             throw selectError;
           }
 
@@ -100,11 +104,14 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             });
 
           if (upsertError) {
-            console.error(`Error upserting album ${album.name}:`, upsertError);
+            this.workerLogger.error(`Error upserting album ${album.name}:`, upsertError);
             throw upsertError;
           }
           
-          console.log(`Upserted album record: ${album.name} (${album.id})`);
+          this.workerLogger.info(`Upserted album record: ${album.name} (${album.id})`);
+          
+          // Delay before queueing track discovery
+          await wait(500); // New delay before queueing track discovery
           
           await this.enqueue('track_discovery', {
             albumId: album.id,
@@ -112,43 +119,43 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             artistId
           });
           
-          console.log(`Enqueued track discovery for album: ${album.name}`);
+          this.workerLogger.info(`Enqueued track discovery for album: ${album.name}`);
           validAlbumsCount++;
           
           // Additional wait to respect rate limits
-          await wait(200);
+          await wait(1000); // Increased from 200ms to 1000ms
         } catch (albumError) {
-          console.error(`Error processing album ${album.name}:`, albumError);
+          this.workerLogger.error(`Error processing album ${album.name}:`, albumError);
         }
       }
       
-      console.log(`Processed ${albums.items.length} albums, valid: ${validAlbumsCount}`);
+      this.workerLogger.info(`Processed ${albums.items.length} albums, valid: ${validAlbumsCount}`);
       
       if (albums.items.length > 0 && offset + albums.items.length < albums.total) {
         const newOffset = offset + albums.items.length;
         // Add a longer delay before enqueueing the next page to reduce overall throughput
-        await wait(1000);
+        await wait(2000); // Increased from 1000ms to 2000ms
         await this.enqueue('album_discovery', { artistId, offset: newOffset });
-        console.log(`Enqueued next page of albums for artist ${artistId} with offset ${newOffset}`);
+        this.workerLogger.info(`Enqueued next page of albums for artist ${artistId} with offset ${newOffset}`);
       } else {
-        console.log(`Finished processing all albums for artist ${artistId}`);
+        this.workerLogger.info(`Finished processing all albums for artist ${artistId}`);
       }
     } catch (error) {
-      console.error(`Error in album discovery for artist ${artistId}:`, error);
+      this.workerLogger.error(`Error in album discovery for artist ${artistId}:`, error);
       throw error;
     }
   }
 
   async resetQueue(): Promise<void> {
     try {
-      console.log("Resetting album_discovery queue...");
+      this.workerLogger.info("Resetting album_discovery queue...");
       
       await this.supabase.rpc("pgmq_drop_and_recreate_queue", { queue_name: "album_discovery" });
       
-      console.log("Successfully reset album_discovery queue");
+      this.workerLogger.info("Successfully reset album_discovery queue");
       return;
     } catch (error) {
-      console.error("Error resetting album_discovery queue:", error);
+      this.workerLogger.error("Error resetting album_discovery queue:", error);
       throw error;
     }
   }
@@ -162,7 +169,7 @@ serve(async (req: Request) => {
   }
 
   try {
-    console.log('Album Discovery worker received request');
+    logger.info('Album Discovery worker received request');
     
     if (req.method === 'POST') {
       const body = await req.json().catch(() => ({}));
@@ -181,7 +188,7 @@ serve(async (req: Request) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
     });
   } catch (error) {
-    console.error("Worker execution error:", error);
+    logger.error("Worker execution error:", error);
     
     return new Response(JSON.stringify({ 
       error: error.message,

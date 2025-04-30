@@ -58,7 +58,7 @@ const corsHeaders = {
 
 class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   private workerLogger = logger.child({ worker: 'TrackDiscoveryWorker' });
-  private batchSize = 10; // Process tracks in batches of this size
+  private batchSize = 3; // Reduced from 10 to 3 to reduce concurrency
   
   constructor() {
     super('track_discovery', 60);
@@ -205,7 +205,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   }
   
   /**
-   * Process tracks in batches to improve efficiency
+   * Process tracks sequentially rather than in parallel batches
    */
   private async processTracks(
     tracks: Track[],
@@ -265,31 +265,37 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       return stats;
     }
     
-    // Process in batches of batchSize
+    // Process tracks in smaller batches
     for (let i = 0; i < newTracks.length; i += this.batchSize) {
       const batch = newTracks.slice(i, i + this.batchSize);
       
-      // Get detailed information for each track in the batch
-      const detailedBatch = await Promise.all(batch.map(async track => {
+      // Process tracks sequentially instead of using Promise.all
+      const batchDetailedTracks: TrackWithDetails[] = [];
+      for (const track of batch) {
         try {
+          // Add delay between each track detail request
+          await wait(800); // Added delay between API calls
+          
           const trackDetails = await getTrackDetails(track.id);
-          return {
+          batchDetailedTracks.push({
             ...track,
             popularity: trackDetails.popularity,
             preview_url: trackDetails.preview_url
-          };
+          });
+          
+          this.workerLogger.debug(`Fetched details for track: ${track.name}`);
         } catch (error) {
           this.workerLogger.error(`Error fetching details for track ${track.id}:`, error);
           // Return original track if can't get details
-          return track;
+          batchDetailedTracks.push(track);
         }
-      }));
+      }
       
       // Create tracks and process results
-      const trackUuids = await this.createTracks(detailedBatch, albumUuid, artistUuid);
+      const trackUuids = await this.createTracks(batchDetailedTracks, albumUuid, artistUuid);
       
       // Enqueue producer identification for successfully created tracks
-      for (const track of detailedBatch) {
+      for (const track of batchDetailedTracks) {
         if (trackUuids.has(track.id)) {
           await this.enqueue('producer_identification', {
             trackId: track.id,
@@ -303,9 +309,9 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         }
       }
       
-      // Add a slight throttle between batches to avoid rate limits
+      // Add a significant delay between batches to avoid rate limits
       if (i + this.batchSize < newTracks.length) {
-        await wait(1000);
+        await wait(2000); // Increased from 1000ms to 2000ms
       }
     }
     
@@ -338,6 +344,9 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
 
       const artistUuid = artistData.id;
       
+      // Add delay before fetching tracks
+      await wait(500); // New delay before fetching album tracks
+      
       const tracks = await getAlbumTracks(albumId, offset);
       contextLogger.info(`Found ${tracks.items.length} potential tracks in album ${albumName}`);
 
@@ -368,6 +377,9 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       
       // If we have more tracks to process, enqueue the next batch
       if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && stats.validCount > 0) {
+        // Add more delay between pagination
+        await wait(2000); // Increased from default delay
+        
         const newOffset = offset + tracks.items.length;
         await this.enqueue('track_discovery', {
           albumId,

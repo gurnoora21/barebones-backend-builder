@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { logger } from "./logger.ts";
 import { wait, getRetryDelayFromHeaders } from "./retry.ts";
@@ -112,7 +113,7 @@ export class CircuitBreaker {
     }
   }
   
-  // New method to record a failure from response for rate limits
+  // Record a failure from response for rate limits
   async recordFailure(response: Response, customTimeoutMs?: number): Promise<void> {
     if (response.status === 429) {
       let retryDelayMs: number | null = null;
@@ -361,7 +362,7 @@ export class CircuitBreakerRegistry {
       if (circuitName === 'spotify-api') {
         // Adjust settings for more resilience
         this.logger.info(`Creating spotify-api circuit breaker with tuned settings`);
-        options.failureThreshold = 5; // Increased from 3 to 5
+        options.failureThreshold = 10; // Increased from 5 to 10
         options.resetTimeoutMs = 15 * 60 * 1000; // 15 minutes instead of 1 hour
         options.halfOpenSuccessThreshold = 1; // Reduced from 2 to 1
       } else if (circuitName === 'spotify-rate-limit') {

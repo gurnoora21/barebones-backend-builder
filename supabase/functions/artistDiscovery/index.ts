@@ -1,7 +1,8 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getSpotifyArtistId, spotifyApi } from "../lib/spotifyClient.ts";
+import { getSpotifyArtistId, spotifyApi, wait } from "../lib/spotifyClient.ts";
+import { logger } from "../lib/logger.ts";
 
 interface ArtistDiscoveryMsg {
   artistId?: string;
@@ -14,18 +15,20 @@ const corsHeaders = {
 };
 
 class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
+  private workerLogger = logger.child({ worker: 'ArtistDiscoveryWorker' });
+
   constructor() {
     // Increase visibility timeout from 60 to 120 seconds
     super('artist_discovery', 120);
   }
 
   protected async process(msg: ArtistDiscoveryMsg): Promise<void> {
-    console.log(`Processing artist discovery message:`, msg);
+    this.workerLogger.info(`Processing artist discovery message:`, msg);
     
     // Enhanced logging for input validation
     if (!msg.artistId && !msg.artistName) {
       const errorMsg = 'No artist ID or name provided';
-      console.error(errorMsg);
+      this.workerLogger.error(errorMsg);
       throw new Error(errorMsg);
     }
     
@@ -33,32 +36,57 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
     
     // Detailed logging for artist ID resolution
     if (!artistId && msg.artistName) {
-      console.log(`Looking up artist ID for name: ${msg.artistName}`);
+      this.workerLogger.info(`Looking up artist ID for name: ${msg.artistName}`);
       try {
         artistId = await getSpotifyArtistId(msg.artistName);
       } catch (error) {
-        console.error(`Failed to resolve artist ID for name ${msg.artistName}:`, error);
+        this.workerLogger.error(`Failed to resolve artist ID for name ${msg.artistName}:`, error);
         throw error;
       }
       
       if (!artistId) {
         const errorMsg = `Artist not found: ${msg.artistName}`;
-        console.error(errorMsg);
+        this.workerLogger.error(errorMsg);
         throw new Error(errorMsg);
       }
       
-      console.log(`Found artist ID: ${artistId} for name: ${msg.artistName}`);
+      this.workerLogger.info(`Found artist ID: ${artistId} for name: ${msg.artistName}`);
     }
     
     if (!artistId) {
       const errorMsg = 'No artistId or artistName provided';
-      console.error(errorMsg);
+      this.workerLogger.error(errorMsg);
       throw new Error(errorMsg);
     }
 
     try {
-      // Fetch additional artist details from Spotify with shorter timeout
-      const artistDetails = await spotifyApi<any>(`artists/${artistId}`, { timeout: 25000 });
+      // Add retry logic and timeout to the Spotify API call
+      let retries = 0;
+      const maxRetries = 3;
+      let artistDetails = null;
+      
+      while (retries <= maxRetries) {
+        try {
+          // Fetch additional artist details from Spotify with shorter timeout
+          artistDetails = await spotifyApi<any>(`artists/${artistId}`, { timeout: 25000 });
+          break;
+        } catch (error) {
+          retries++;
+          
+          if (error.status === 429 || retries > maxRetries) {
+            this.workerLogger.error(`Failed to fetch artist details after ${retries} attempts:`, error);
+            throw error;
+          }
+          
+          const delayMs = Math.pow(2, retries) * 1000; // Exponential backoff
+          this.workerLogger.warn(`Retrying artist details fetch, attempt ${retries}/${maxRetries}, waiting ${delayMs}ms`);
+          await wait(delayMs);
+        }
+      }
+      
+      if (!artistDetails) {
+        throw new Error(`Failed to fetch artist details for ${artistId} after ${maxRetries} attempts`);
+      }
       
       // Extract image URL from artist details
       const imageUrl = artistDetails.images?.[0]?.url || null;
@@ -66,12 +94,12 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       // Check if artist already exists
       const { data: existingArtist, error: selectError } = await this.supabase
         .from('artists')
-        .select('id')
+        .select('id, metadata')
         .eq('spotify_id', artistId)
-        .single();
+        .maybeSingle();
 
       if (selectError && selectError.code !== 'PGRST116') {  // Not a "no rows" error
-        console.error('Database select error:', selectError);
+        this.workerLogger.error('Database select error:', selectError);
         throw selectError;
       }
 
@@ -93,7 +121,7 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         popularity: artistDetails.popularity,
         image_url: imageUrl, // Store the image URL
         metadata: { 
-          ...existingArtist?.metadata,
+          ...(existingArtist?.metadata || {}),
           source: 'spotify',
           images: artistDetails.images, // Store all images in metadata
           discovery_timestamp: new Date().toISOString()
@@ -119,21 +147,24 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       }
 
       if (insertOrUpdateResult.error) {
-        console.error('Error inserting/updating artist:', insertOrUpdateResult.error);
+        this.workerLogger.error('Error inserting/updating artist:', insertOrUpdateResult.error);
         throw insertOrUpdateResult.error;
       }
       
-      console.log(`Created/Updated artist record: ${msg.artistName || artistDetails.name}`);
+      this.workerLogger.info(`Created/Updated artist record: ${msg.artistName || artistDetails.name}`);
 
+      // Add delay before queuing the next job
+      await wait(1000);
+      
       // Queue album discovery with offset 0
       await this.enqueue('album_discovery', { 
         artistId,
         offset: 0
       });
       
-      console.log(`Enqueued album discovery task for artist ${artistId}`);
+      this.workerLogger.info(`Enqueued album discovery task for artist ${artistId}`);
     } catch (error) {
-      console.error(`Comprehensive error in artist discovery:`, error);
+      this.workerLogger.error(`Comprehensive error in artist discovery:`, error);
       throw error;  // Re-throw to allow PageWorker to handle
     }
   }
@@ -148,7 +179,7 @@ serve(async (req: Request) => {
 
   try {
     // Enhanced logging for function entry
-    console.log('Artist Discovery worker received request');
+    logger.info('Artist Discovery worker received request');
 
     if (req.method === 'POST') {
       try {
@@ -168,7 +199,7 @@ serve(async (req: Request) => {
           });
         }
       } catch (e) {
-        console.log("No valid JSON body or not adding a manual message", e);
+        logger.warn("No valid JSON body or not adding a manual message", e);
       }
     }
     
@@ -178,7 +209,7 @@ serve(async (req: Request) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
     });
   } catch (error) {
-    console.error("Comprehensive worker execution error:", error);
+    logger.error("Comprehensive worker execution error:", error);
     
     return new Response(JSON.stringify({ 
       error: error.message,
