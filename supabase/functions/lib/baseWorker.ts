@@ -1,6 +1,9 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from '../types.ts';
+import { safeUpsert } from './upsertHelpers.ts';
+import { withRetry } from './retry.ts';
+import { logger } from './logger.ts';
 
 export abstract class BaseWorker<Msg> {
   protected supabase: SupabaseClient<Database>;
@@ -76,7 +79,27 @@ export abstract class BaseWorker<Msg> {
         try {
           console.log(`Processing message ${msgId} from queue ${this.queueName}`);
           const startTime = Date.now();
-          await this.processMessage(msgBody, msgId);
+
+          // Use retry logic with backoff for message processing
+          await withRetry(
+            () => this.processMessage(msgBody, msgId),
+            {
+              maxAttempts: 3,
+              initialDelayMs: 1000,
+              factor: 2,
+              jitter: true,
+              retryableErrorPredicate: (error) => {
+                // Determine which errors are safe to retry
+                return error && (
+                  error.message?.includes('timeout') ||
+                  error.message?.includes('network error') ||
+                  error.message?.includes('connection') || 
+                  (error.code && ['23505', '40001', '40P01'].includes(error.code))
+                );
+              }
+            }
+          );
+          
           const processingTime = Date.now() - startTime;
           
           // Archive message on success to remove it
@@ -132,6 +155,23 @@ export abstract class BaseWorker<Msg> {
       console.error(`Worker execution error in ${this.queueName}:`, err);
       await this.logIssue('worker_execution_error', { error: String(err) });
     }
+  }
+
+  // Safe upsert helper method for database operations
+  protected async safeUpsert<T = any>(
+    tableName: string,
+    data: Record<string, any>,
+    keyField: string,
+    returnFields: string = '*'
+  ): Promise<{ data: T | null; id: string | null; error: Error | null }> {
+    return safeUpsert<T>(
+      this.supabase, 
+      tableName, 
+      data, 
+      keyField, 
+      returnFields,
+      { worker: this.queueName }
+    );
   }
 
   // Enqueue a message in a queue

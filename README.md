@@ -163,3 +163,11 @@ The system includes these production-grade features:
    - Message schema validation
    - Strong typing with TypeScript
    - Dead-letter handling of invalid messages
+
+## Recent Improvements
+
+- **Robust Upsert Handling**: Added `safeUpsert` helper to gracefully handle conflicts and race conditions
+- **Batch Processing**: Increased worker batch sizes for better throughput
+- **Error Handling**: Enhanced retry logic with proper backoff and error categorization
+- **Backpressure Control**: Implemented global concurrency management
+- **Schema Cleanup**: Optimized database tables for monitoring and logging

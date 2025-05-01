@@ -44,7 +44,7 @@ export class Transaction {
   }
 }
 
-// Create database transaction helper functions
+// Create database transaction helpers
 export function createDbTransactionHelpers(supabase: SupabaseClient<Database>) {
   // RPC function to begin transaction
   if (!supabase.rpc) {
