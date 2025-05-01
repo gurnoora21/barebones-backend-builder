@@ -78,6 +78,82 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
     return !!data;
   }
 
+  /**
+   * Safely retrieves an album ID given a Spotify ID, handling potential conflicts
+   * @param spotifyId The Spotify album ID
+   * @param albumName Album name for logging
+   * @returns The database UUID of the album (existing or newly inserted)
+   */
+  private async getOrUpsertAlbum(album: any, artist: { id: string }, coverUrl: string | null, formattedReleaseDate: string | null): Promise<string | null> {
+    try {
+      // Use upsert with onConflict to handle duplicate spotify_id values
+      const { data: insertedAlbum, error: upsertError } = await this.supabase
+        .from('albums')
+        .upsert({
+          spotify_id: album.id,
+          artist_id: artist.id,
+          name: album.name,
+          release_date: formattedReleaseDate,
+          cover_url: coverUrl, // Store the cover URL
+          metadata: {
+            source: 'spotify',
+            type: album.album_type,
+            total_tracks: album.total_tracks,
+            images: album.images, // Store all images in metadata
+            discovery_timestamp: new Date().toISOString()
+          }
+        }, {
+          onConflict: 'spotify_id', // Add onConflict option to handle duplicates
+          ignoreDuplicates: false // Update existing records
+        })
+        .select('id, spotify_id')
+        .single();
+
+      if (upsertError) {
+        // Check if this is a unique constraint violation (code 23505)
+        if (upsertError.code === '23505') {
+          this.workerLogger.info(`Conflict on album ${album.name}, fetching existing ID`);
+          
+          // Fetch the existing album record instead of failing
+          const { data: existingAlbum, error: fetchError } = await this.supabase
+            .from('albums')
+            .select('id')
+            .eq('spotify_id', album.id)
+            .single();
+            
+          if (fetchError) {
+            this.workerLogger.error(`Error fetching existing album ${album.name} after conflict:`, fetchError);
+            return null;
+          }
+          
+          if (!existingAlbum || !this.isValidUuid(existingAlbum.id)) {
+            this.workerLogger.warn(`Invalid or missing album UUID for ${album.name} after conflict resolution`);
+            return null;
+          }
+          
+          this.workerLogger.info(`Resolved duplicate album ${album.name} (${album.id}), using UUID ${existingAlbum.id}`);
+          return existingAlbum.id;
+        } else {
+          // For other types of errors, log and return null
+          this.workerLogger.error(`Error upserting album ${album.name}:`, upsertError);
+          return null;
+        }
+      }
+      
+      this.workerLogger.info(`Upserted album record: ${album.name} (${album.id}) with UUID ${insertedAlbum.id}`);
+      
+      if (!insertedAlbum || !this.isValidUuid(insertedAlbum.id)) {
+        this.workerLogger.warn(`Invalid or missing album UUID for ${album.name}, skipping track discovery`);
+        return null;
+      }
+      
+      return insertedAlbum.id;
+    } catch (error) {
+      this.workerLogger.error(`Unexpected error processing album ${album.name}:`, error);
+      return null;
+    }
+  }
+
   protected async process(msg: AlbumDiscoveryMsg): Promise<void> {
     const { artistId, offset } = msg;
     this.workerLogger.info(`Processing album discovery for artist ${artistId} with offset ${offset}`);
@@ -124,38 +200,16 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           
           const formattedReleaseDate = this.formatReleaseDate(album.release_date);
           
-          // Use upsert with onConflict to handle duplicate spotify_id values
-          const { data: insertedAlbum, error: upsertError } = await this.supabase
-            .from('albums')
-            .upsert({
-              spotify_id: album.id,
-              artist_id: artist.id,
-              name: album.name,
-              release_date: formattedReleaseDate,
-              cover_url: coverUrl, // Store the cover URL
-              metadata: {
-                source: 'spotify',
-                type: album.album_type,
-                total_tracks: album.total_tracks,
-                images: fullAlbumDetails.images, // Store all images in metadata
-                discovery_timestamp: new Date().toISOString()
-              }
-            }, {
-              onConflict: 'spotify_id', // Add onConflict option to handle duplicates
-              ignoreDuplicates: false // Update existing records
-            })
-            .select('id, spotify_id')
-            .single();
-
-          if (upsertError) {
-            this.workerLogger.error(`Error upserting album ${album.name}:`, upsertError);
-            throw upsertError;
-          }
+          // Use our new robust method to get or create the album
+          const albumUuid = await this.getOrUpsertAlbum(
+            { ...album, images: fullAlbumDetails.images },
+            artist,
+            coverUrl,
+            formattedReleaseDate
+          );
           
-          this.workerLogger.info(`Upserted album record: ${album.name} (${album.id})`);
-          
-          if (!insertedAlbum || !this.isValidUuid(insertedAlbum.id)) {
-            this.workerLogger.warn(`Invalid or missing album UUID for ${album.name}, skipping track discovery`);
+          if (!albumUuid) {
+            this.workerLogger.warn(`Could not get or create album ${album.name}, skipping track discovery`);
             continue;
           }
           
@@ -164,7 +218,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           
           await this.enqueue('track_discovery', {
             albumId: album.id,
-            albumUuid: insertedAlbum.id, // Send the database UUID along with the message
+            albumUuid: albumUuid, // Send the database UUID along with the message
             albumName: album.name,
             artistId
           });
@@ -294,4 +348,3 @@ serve(async (req: Request) => {
     });
   }
 });
-

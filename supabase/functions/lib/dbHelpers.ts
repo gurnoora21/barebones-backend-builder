@@ -81,6 +81,60 @@ export function createDbTransactionHelpers(supabase: SupabaseClient<Database>) {
           );
         }
       });
+    },
+    
+    /**
+     * Helper function to handle unique constraint violations gracefully
+     * Attempts to fetch the existing record if a duplicate key error occurs
+     */
+    async upsertWithConflictResolution<T>(
+      table: string, 
+      data: Record<string, any>, 
+      options: { 
+        onConflict: string, 
+        keyField: string,
+        returnFields: string 
+      }
+    ): Promise<{ data: T | null; error: Error | null }> {
+      try {
+        // First try the upsert operation
+        const { data: upsertedData, error: upsertError } = await supabase
+          .from(table)
+          .upsert(data, {
+            onConflict: options.onConflict,
+            ignoreDuplicates: false
+          })
+          .select(options.returnFields);
+        
+        // If successful, return the data
+        if (!upsertError) {
+          return { data: upsertedData as unknown as T, error: null };
+        }
+        
+        // If we hit a unique constraint violation
+        if (upsertError.code === '23505') {
+          logger.info(`Handling conflict on ${table} with ${options.keyField}=${data[options.keyField]}`);
+          
+          // Try to fetch the existing record
+          const { data: existingData, error: fetchError } = await supabase
+            .from(table)
+            .select(options.returnFields)
+            .eq(options.keyField, data[options.keyField])
+            .single();
+            
+          if (fetchError) {
+            return { data: null, error: fetchError };
+          }
+          
+          return { data: existingData as unknown as T, error: null };
+        }
+        
+        // Any other error
+        return { data: null, error: upsertError };
+      } catch (error) {
+        logger.error(`Unexpected error in upsertWithConflictResolution for ${table}:`, error);
+        return { data: null, error: error as Error };
+      }
     }
   };
 }
