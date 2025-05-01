@@ -7,6 +7,7 @@ import { logger } from "../lib/logger.ts";
 interface ArtistDiscoveryMsg {
   artistId?: string;
   artistName?: string;
+  metadata?: Record<string, any>;
 }
 
 const corsHeaders = {
@@ -125,20 +126,31 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         }
       }
 
+      // Extract genres as an array
+      const genres = Array.isArray(artistDetails.genres) ? artistDetails.genres : [];
+
+      // Combine any incoming metadata with existing metadata
+      const combinedMetadata = { 
+        ...(existingArtist?.metadata || {}),
+        ...(msg.metadata || {}),
+        source: msg.metadata?.source || 'spotify',
+        images: artistDetails.images, // Store all images in metadata
+        discovery_timestamp: new Date().toISOString()
+      };
+
       // Prepare artist update data
       const artistUpdateData = {
         spotify_id: artistId,
-        name: msg.artistName || artistDetails.name,
-        followers: followersCount, // Use the extracted followers count
+        name: artistDetails.name || msg.artistName, // Prioritize Spotify's name but fallback to msg name
+        followers: followersCount,
         popularity: artistDetails.popularity,
-        image_url: imageUrl, // Store the image URL
-        metadata: { 
-          ...(existingArtist?.metadata || {}),
-          source: 'spotify',
-          images: artistDetails.images, // Store all images in metadata
-          discovery_timestamp: new Date().toISOString()
-        }
+        genres: genres,
+        image_url: imageUrl,
+        metadata: combinedMetadata
       };
+
+      // For debugging purposes
+      this.workerLogger.debug('Artist data to insert/update:', artistUpdateData);
 
       let insertOrUpdateResult;
       if (!existingArtist) {
@@ -163,7 +175,9 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
         throw insertOrUpdateResult.error;
       }
       
-      this.workerLogger.info(`Created/Updated artist record: ${msg.artistName || artistDetails.name}`);
+      // Get the assigned ID of the artist
+      const artistDbId = insertOrUpdateResult.data.id;
+      this.workerLogger.info(`Created/Updated artist record: ${artistUpdateData.name} with ID: ${artistDbId}`);
 
       // Add delay before queuing the next job
       await wait(1000);
@@ -178,6 +192,27 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       
       // Log the total API calls made for this artist
       this.workerLogger.info(`Artist discovery for ${artistId} made ${getSpotifyCallCount()} Spotify calls`);
+      
+      // IMPORTANT: Update the seeding_artists record to mark as processed
+      if (msg.metadata?.source === 'seeder') {
+        try {
+          await this.supabase
+            .from('seeding_artists')
+            .update({ 
+              processed_at: new Date().toISOString(),
+              details: {
+                ...msg.metadata,
+                artistDbId
+              }
+            })
+            .eq('spotify_id', artistId);
+          
+          this.workerLogger.info(`Updated seeding_artists record for ${artistId}`);
+        } catch (error) {
+          this.workerLogger.error(`Failed to update seeding_artists record:`, error);
+          // Don't throw error here as the main processing succeeded
+        }
+      }
     } catch (error) {
       this.workerLogger.error(`Comprehensive error in artist discovery:`, error);
       throw error;  // Re-throw to allow PageWorker to handle
@@ -203,7 +238,8 @@ serve(async (req: Request) => {
         if (body.artistId || body.artistName) {
           await worker.enqueue('artist_discovery', {
             artistId: body.artistId,
-            artistName: body.artistName
+            artistName: body.artistName,
+            metadata: body.metadata || {}
           });
           
           return new Response(JSON.stringify({ 
