@@ -1,7 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
-import { getSpotifyArtistId, spotifyApi, wait } from "../lib/spotifyClient.ts";
+import { getSpotifyArtistId, spotifyApi, wait, resetSpotifyCallCount, getSpotifyCallCount } from "../lib/spotifyClient.ts";
 import { logger } from "../lib/logger.ts";
 
 interface ArtistDiscoveryMsg {
@@ -16,6 +16,8 @@ const corsHeaders = {
 
 class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
   private workerLogger = logger.child({ worker: 'ArtistDiscoveryWorker' });
+  // Track already processed artists to avoid duplication in the same session
+  private processedArtists = new Set<string>();
 
   constructor() {
     // Increase visibility timeout from 60 to 120 seconds
@@ -23,6 +25,9 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
   }
 
   protected async process(msg: ArtistDiscoveryMsg): Promise<void> {
+    // Reset call counter at the start
+    resetSpotifyCallCount();
+    
     this.workerLogger.info(`Processing artist discovery message:`, msg);
     
     // Enhanced logging for input validation
@@ -58,6 +63,13 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       this.workerLogger.error(errorMsg);
       throw new Error(errorMsg);
     }
+    
+    // Check for duplicate processing
+    if (this.processedArtists.has(artistId)) {
+      this.workerLogger.info(`Skipping already processed artist ${artistId}`);
+      return;
+    }
+    this.processedArtists.add(artistId);
 
     try {
       // Add retry logic and timeout to the Spotify API call
@@ -163,6 +175,9 @@ class ArtistDiscoveryWorker extends PageWorker<ArtistDiscoveryMsg> {
       });
       
       this.workerLogger.info(`Enqueued album discovery task for artist ${artistId}`);
+      
+      // Log the total API calls made for this artist
+      this.workerLogger.info(`Artist discovery for ${artistId} made ${getSpotifyCallCount()} Spotify calls`);
     } catch (error) {
       this.workerLogger.error(`Comprehensive error in artist discovery:`, error);
       throw error;  // Re-throw to allow PageWorker to handle

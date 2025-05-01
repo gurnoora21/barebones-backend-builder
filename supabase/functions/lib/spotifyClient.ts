@@ -12,6 +12,11 @@ import { getEnvConfig } from './dbHelpers.ts';
 const spotifyLogger = logger.child({ service: 'SpotifyAPI' });
 const env = getEnvConfig();
 
+// Track API calls for monitoring
+let _spotifyCallCount = 0;
+export function resetSpotifyCallCount() { _spotifyCallCount = 0; }
+export function getSpotifyCallCount() { return _spotifyCallCount; }
+
 // Define endpoint types for better tracking
 type EndpointType = 'artists' | 'albums' | 'tracks' | 'token' | 'other';
 
@@ -35,12 +40,12 @@ function initializePool(endpoint: EndpointType, maxConcurrent: number = DEFAULT_
   return endpointPools.get(endpoint)!;
 }
 
-// Initialize default pools
-initializePool('artists', 2);
-initializePool('albums', 1); // More conservative for album endpoints
-initializePool('tracks', 2);
-initializePool('token', 1); // Token requests should be strictly limited
-initializePool('other', 1);
+// Initialize default pools with increased concurrency limits
+initializePool('artists', 4);  // Was 2
+initializePool('albums', 3);   // Was 1
+initializePool('tracks', 4);   // Was 2
+initializePool('token', 1);    // Keep at 1
+initializePool('other', 3);    // Was 1
 
 // Defaults for rate limit handling
 const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 60; // Default retry after 1 minute if no header
@@ -405,8 +410,15 @@ export async function getTrackDetails(trackId: string): Promise<any> {
 
 // Backpressure-aware fetch wrapper with endpoint-specific concurrency control
 export async function controlledFetch(url: string, options?: RequestInit, endpointType: EndpointType = 'other'): Promise<Response> {
+  // Track API call count
+  _spotifyCallCount++;
+  
   // Get or create pool for this endpoint
   const pool = endpointPools.get(endpointType) || initializePool(endpointType);
+  
+  // Log request with call count
+  const logContext = { count: _spotifyCallCount, endpoint: endpointType };
+  spotifyLogger.debug(`API request #${_spotifyCallCount} for ${endpointType}`, logContext);
   
   // Wait until we're under concurrency limit for this endpoint
   while (pool.currentCount >= pool.maxConcurrent) {
@@ -433,15 +445,15 @@ export async function controlledFetch(url: string, options?: RequestInit, endpoi
 function getEndpointCooldown(endpointType: EndpointType): number {
   switch (endpointType) {
     case 'albums':
-      return 350; // Albums need more cooldown
+      return 150; // Was 350ms
     case 'artists':
-      return 300;
+      return 100; // Was 300ms
     case 'tracks':
-      return 250;
+      return 100; // Was 250ms
     case 'token':
       return 500; // Token refreshes need more cooldown
     default:
-      return 250; // Default from original code
+      return 100; // Was 250ms
   }
 }
 

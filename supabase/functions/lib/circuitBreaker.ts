@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { logger } from "./logger.ts";
 import { wait, getRetryDelayFromHeaders } from "./retry.ts";
@@ -132,7 +131,9 @@ export class CircuitBreaker {
           
           // Apply validation and capping to the delay
           if (retryDelayMs) {
-            const MAX_ALLOWED_RETRY_DELAY = 60 * 60 * 1000; // 1 hour max
+            // IMPORTANT CHANGE: Use Spotify's actual retry time + small buffer 
+            // Cap to 2 minutes instead of 1 hour
+            const MAX_ALLOWED_RETRY_DELAY = 2 * 60 * 1000; // 2 minutes max
             
             if (retryDelayMs > MAX_ALLOWED_RETRY_DELAY) {
               this.logger.warn(`Capping excessive retry delay ${retryDelayMs}ms to ${MAX_ALLOWED_RETRY_DELAY}ms`);
@@ -493,4 +494,3 @@ export class CircuitBreakerRegistry {
     }
   }
 }
-

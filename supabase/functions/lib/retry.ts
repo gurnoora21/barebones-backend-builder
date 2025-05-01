@@ -306,8 +306,8 @@ export async function withRateLimitedRetry<T>(
       if (isRateLimit && error.headers) {
         const retryAfterMs = getRetryDelayFromHeaders(error.headers);
         if (retryAfterMs && retryAfterMs > 0) {
-          // Cap retry delay to 1 hour maximum
-          const MAX_RETRY_DELAY = 60 * 60 * 1000; // 1 hour
+          // Cap retry delay to 2 minutes maximum (reduced from 1 hour)
+          const MAX_RETRY_DELAY = 2 * 60 * 1000; // 2 minutes
           delay = Math.min(retryAfterMs, MAX_RETRY_DELAY);
           
           retryLogger.info(`Using Retry-After header value: ${delay}ms`, {
