@@ -138,33 +138,33 @@ export type Database = {
         }
         Relationships: []
       }
-      circuit_breaker_executions: {
+      circuit_breaker_executions_backup_20250501: {
         Row: {
-          circuit_name: string
-          created_at: string
+          circuit_name: string | null
+          created_at: string | null
           details: Json | null
-          duration_ms: number
-          id: string
-          state: string
-          success: boolean
+          duration_ms: number | null
+          id: string | null
+          state: string | null
+          success: boolean | null
         }
         Insert: {
-          circuit_name: string
-          created_at?: string
+          circuit_name?: string | null
+          created_at?: string | null
           details?: Json | null
-          duration_ms: number
-          id?: string
-          state: string
-          success: boolean
+          duration_ms?: number | null
+          id?: string | null
+          state?: string | null
+          success?: boolean | null
         }
         Update: {
-          circuit_name?: string
-          created_at?: string
+          circuit_name?: string | null
+          created_at?: string | null
           details?: Json | null
-          duration_ms?: number
-          id?: string
-          state?: string
-          success?: boolean
+          duration_ms?: number | null
+          id?: string | null
+          state?: string | null
+          success?: boolean | null
         }
         Relationships: []
       }
@@ -392,27 +392,27 @@ export type Database = {
         }
         Relationships: []
       }
-      rate_limit_events: {
+      rate_limit_events_backup_20250501: {
         Row: {
-          created_at: string
+          created_at: string | null
           details: Json | null
-          event: string
-          id: string
-          key: string
+          event: string | null
+          id: string | null
+          key: string | null
         }
         Insert: {
-          created_at?: string
+          created_at?: string | null
           details?: Json | null
-          event: string
-          id?: string
-          key: string
+          event?: string | null
+          id?: string | null
+          key?: string | null
         }
         Update: {
-          created_at?: string
+          created_at?: string | null
           details?: Json | null
-          event?: string
-          id?: string
-          key?: string
+          event?: string | null
+          id?: string | null
+          key?: string | null
         }
         Relationships: []
       }
@@ -446,24 +446,27 @@ export type Database = {
       seeding_artists: {
         Row: {
           details: Json | null
-          job_id: string
+          id: string
+          job_id: string | null
           processed_at: string | null
           spotify_id: string
-          success: boolean | null
+          success: boolean
         }
         Insert: {
           details?: Json | null
-          job_id: string
+          id?: string
+          job_id?: string | null
           processed_at?: string | null
           spotify_id: string
-          success?: boolean | null
+          success: boolean
         }
         Update: {
           details?: Json | null
-          job_id?: string
+          id?: string
+          job_id?: string | null
           processed_at?: string | null
           spotify_id?: string
-          success?: boolean | null
+          success?: boolean
         }
         Relationships: [
           {
@@ -475,13 +478,37 @@ export type Database = {
           },
         ]
       }
+      seeding_artists_backup_20250501: {
+        Row: {
+          details: Json | null
+          job_id: string | null
+          processed_at: string | null
+          spotify_id: string | null
+          success: boolean | null
+        }
+        Insert: {
+          details?: Json | null
+          job_id?: string | null
+          processed_at?: string | null
+          spotify_id?: string | null
+          success?: boolean | null
+        }
+        Update: {
+          details?: Json | null
+          job_id?: string | null
+          processed_at?: string | null
+          spotify_id?: string | null
+          success?: boolean | null
+        }
+        Relationships: []
+      }
       seeding_jobs: {
         Row: {
           completed_at: string | null
           config: Json
           id: string
           job_type: string
-          progress: Json | null
+          progress: Json
           results: Json | null
           started_at: string | null
           status: string
@@ -491,59 +518,122 @@ export type Database = {
           config: Json
           id?: string
           job_type: string
-          progress?: Json | null
+          progress: Json
           results?: Json | null
           started_at?: string | null
-          status?: string
+          status: string
         }
         Update: {
           completed_at?: string | null
           config?: Json
           id?: string
           job_type?: string
-          progress?: Json | null
+          progress?: Json
           results?: Json | null
           started_at?: string | null
           status?: string
         }
         Relationships: []
       }
-      traces: {
+      seeding_jobs_backup_20250501: {
+        Row: {
+          completed_at: string | null
+          config: Json | null
+          id: string | null
+          job_type: string | null
+          progress: Json | null
+          results: Json | null
+          started_at: string | null
+          status: string | null
+        }
+        Insert: {
+          completed_at?: string | null
+          config?: Json | null
+          id?: string | null
+          job_type?: string | null
+          progress?: Json | null
+          results?: Json | null
+          started_at?: string | null
+          status?: string | null
+        }
+        Update: {
+          completed_at?: string | null
+          config?: Json | null
+          id?: string | null
+          job_type?: string | null
+          progress?: Json | null
+          results?: Json | null
+          started_at?: string | null
+          status?: string | null
+        }
+        Relationships: []
+      }
+      trace_summary_backup_20250501: {
+        Row: {
+          duration: unknown | null
+          end_time: string | null
+          operations: string[] | null
+          services: string[] | null
+          span_count: number | null
+          start_time: string | null
+          trace_id: string | null
+        }
+        Insert: {
+          duration?: unknown | null
+          end_time?: string | null
+          operations?: string[] | null
+          services?: string[] | null
+          span_count?: number | null
+          start_time?: string | null
+          trace_id?: string | null
+        }
+        Update: {
+          duration?: unknown | null
+          end_time?: string | null
+          operations?: string[] | null
+          services?: string[] | null
+          span_count?: number | null
+          start_time?: string | null
+          trace_id?: string | null
+        }
+        Relationships: []
+      }
+      traces_backup_20250501: {
         Row: {
           attributes: Json | null
-          created_at: string
+          created_at: string | null
           details: Json | null
-          id: string
-          operation: string
+          id: string | null
+          operation: string | null
           parent_id: string | null
-          service: string
-          span_id: string
-          timestamp: string
-          trace_id: string
+          service: string | null
+          span_id: string | null
+          timestamp: string | null
+          trace_id: string | null
         }
         Insert: {
           attributes?: Json | null
-          created_at?: string
+          created_at?: string | null
           details?: Json | null
-          id?: string
-          operation: string
+          id?: string | null
+          operation?: string | null
           parent_id?: string | null
-          service: string
-          span_id: string
-          timestamp: string
-          trace_id: string
+          service?: string | null
+          span_id?: string | null
+          timestamp?: string | null
+          trace_id?: string | null
         }
         Update: {
           attributes?: Json | null
-          created_at?: string
+          created_at?: string | null
           details?: Json | null
-          id?: string
-          operation?: string
+          id?: string | null
+          operation?: string | null
           parent_id?: string | null
-          service?: string
-          span_id?: string
-          timestamp?: string
-          trace_id?: string
+          service?: string | null
+          span_id?: string | null
+          timestamp?: string | null
+          trace_id?: string | null
         }
         Relationships: []
       }
@@ -791,18 +881,6 @@ export type Database = {
           messages_processed: number | null
           queue_name: string | null
           success_count: number | null
-        }
-        Relationships: []
-      }
-      trace_summary: {
-        Row: {
-          duration: unknown | null
-          end_time: string | null
-          operations: string[] | null
-          services: string[] | null
-          span_count: number | null
-          start_time: string | null
-          trace_id: string | null
         }
         Relationships: []
       }
