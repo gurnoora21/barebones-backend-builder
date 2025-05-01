@@ -17,6 +17,7 @@ const corsHeaders = {
 
 class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
   private workerLogger = logger.child({ worker: 'AlbumDiscoveryWorker' });
+  private processedAlbums = new Set<string>(); // Track albums we've processed in this run
   
   constructor() {
     super('album_discovery', 120);
@@ -44,6 +45,37 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
     
     this.workerLogger.warn(`Unrecognized release date format: ${spotifyReleaseDate}`);
     return null;
+  }
+
+  /**
+   * Check if an album has already been processed in the current run
+   * This provides in-memory deduplication to prevent processing the same album multiple times
+   */
+  private isDuplicate(albumId: string): boolean {
+    if (this.processedAlbums.has(albumId)) {
+      this.workerLogger.debug(`Skipping duplicate album ${albumId} (already processed in this run)`);
+      return true;
+    }
+    this.processedAlbums.add(albumId);
+    return false;
+  }
+
+  /**
+   * Check if an album already exists in the database
+   */
+  private async albumExists(spotifyId: string): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from('albums')
+      .select('id')
+      .eq('spotify_id', spotifyId)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      this.workerLogger.error(`Error checking album existence for ${spotifyId}:`, error);
+      return false; // Assume it doesn't exist on error
+    }
+    
+    return !!data;
   }
 
   protected async process(msg: AlbumDiscoveryMsg): Promise<void> {
@@ -78,6 +110,11 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       // Process albums with increased delays between each album
       for (const album of albums.items) {
         try {
+          // Skip if we've already processed this album in the current run
+          if (this.isDuplicate(album.id)) {
+            continue;
+          }
+
           // Add a delay between each album processing to reduce API pressure
           await wait(750); // Increased from 500ms to 750ms
           
@@ -87,17 +124,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           
           const formattedReleaseDate = this.formatReleaseDate(album.release_date);
           
-          const { data: existingAlbum, error: selectError } = await this.supabase
-            .from('albums')
-            .select('id')
-            .eq('spotify_id', album.id)
-            .single();
-
-          if (selectError && selectError.code !== 'PGRST116') {
-            this.workerLogger.error(`Error checking for existing album ${album.id}:`, selectError);
-            throw selectError;
-          }
-
+          // Use upsert with onConflict to handle duplicate spotify_id values
           const { data: insertedAlbum, error: upsertError } = await this.supabase
             .from('albums')
             .upsert({
@@ -113,6 +140,9 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
                 images: fullAlbumDetails.images, // Store all images in metadata
                 discovery_timestamp: new Date().toISOString()
               }
+            }, {
+              onConflict: 'spotify_id', // Add onConflict option to handle duplicates
+              ignoreDuplicates: false // Update existing records
             })
             .select('id, spotify_id')
             .single();
@@ -202,7 +232,9 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
         status: 'healthy',
         queue: 'album_discovery',
         pendingMessages: pendingMessagesCount,
-        workerTimeout: 120
+        workerTimeout: 120,
+        deduplicationEnabled: true,
+        processedAlbumsCount: this.processedAlbums.size
       };
     } catch (e) {
       return {
@@ -262,3 +294,4 @@ serve(async (req: Request) => {
     });
   }
 });
+
