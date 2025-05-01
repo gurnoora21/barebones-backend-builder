@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { PageWorker } from "../lib/pageWorker.ts";
 import { getArtistAlbums, spotifyApi, wait } from "../lib/spotifyClient.ts";
 import { logger } from "../lib/logger.ts";
+import { validate as uuidValidate } from "https://deno.land/std@0.178.0/uuid/mod.ts";
 
 interface AlbumDiscoveryMsg {
   artistId: string;
@@ -21,6 +22,13 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
     super('album_discovery', 120);
     // Reduce batch size from default to 2
     this.batchProcessor.batchSize = 2;
+  }
+
+  /**
+   * Validates if the string is a valid UUID
+   */
+  private isValidUuid(id: string): boolean {
+    return uuidValidate(id);
   }
 
   private formatReleaseDate(spotifyReleaseDate: string): string | null {
@@ -61,13 +69,17 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
         throw new Error(`Artist ${artistId} not found in database`);
       }
       
+      if (!this.isValidUuid(artist.id)) {
+        throw new Error(`Invalid artist UUID format: ${artist.id}`);
+      }
+      
       let validAlbumsCount = 0;
       
       // Process albums with increased delays between each album
       for (const album of albums.items) {
         try {
           // Add a delay between each album processing to reduce API pressure
-          await wait(500); // Increased from 300ms to 500ms
+          await wait(750); // Increased from 500ms to 750ms
           
           // Fetch full album details to get high-quality images
           const fullAlbumDetails = await spotifyApi<any>(`albums/${album.id}`, { timeout: 20000 });
@@ -86,7 +98,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
             throw selectError;
           }
 
-          const { error: upsertError } = await this.supabase
+          const { data: insertedAlbum, error: upsertError } = await this.supabase
             .from('albums')
             .upsert({
               spotify_id: album.id,
@@ -101,7 +113,9 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
                 images: fullAlbumDetails.images, // Store all images in metadata
                 discovery_timestamp: new Date().toISOString()
               }
-            });
+            })
+            .select('id, spotify_id')
+            .single();
 
           if (upsertError) {
             this.workerLogger.error(`Error upserting album ${album.name}:`, upsertError);
@@ -110,11 +124,17 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           
           this.workerLogger.info(`Upserted album record: ${album.name} (${album.id})`);
           
+          if (!insertedAlbum || !this.isValidUuid(insertedAlbum.id)) {
+            this.workerLogger.warn(`Invalid or missing album UUID for ${album.name}, skipping track discovery`);
+            continue;
+          }
+          
           // Delay before queueing track discovery
-          await wait(500); // New delay before queueing track discovery
+          await wait(750); // Increased delay before queueing track discovery
           
           await this.enqueue('track_discovery', {
             albumId: album.id,
+            albumUuid: insertedAlbum.id, // Send the database UUID along with the message
             albumName: album.name,
             artistId
           });
@@ -123,7 +143,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
           validAlbumsCount++;
           
           // Additional wait to respect rate limits
-          await wait(1000); // Increased from 200ms to 1000ms
+          await wait(1250); // Increased from 1000ms to 1250ms
         } catch (albumError) {
           this.workerLogger.error(`Error processing album ${album.name}:`, albumError);
         }
@@ -134,7 +154,7 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       if (albums.items.length > 0 && offset + albums.items.length < albums.total) {
         const newOffset = offset + albums.items.length;
         // Add a longer delay before enqueueing the next page to reduce overall throughput
-        await wait(2000); // Increased from 1000ms to 2000ms
+        await wait(3000); // Increased from 2000ms to 3000ms
         await this.enqueue('album_discovery', { artistId, offset: newOffset });
         this.workerLogger.info(`Enqueued next page of albums for artist ${artistId} with offset ${newOffset}`);
       } else {
@@ -159,6 +179,38 @@ class AlbumDiscoveryWorker extends PageWorker<AlbumDiscoveryMsg> {
       throw error;
     }
   }
+  
+  /**
+   * Implement health check endpoint
+   */
+  async getHealthStatus(): Promise<object> {
+    try {
+      // Get queue statistics
+      const { data: queueStats, error } = await this.supabase.rpc(
+        'pgmq_read', 
+        { 
+          queue_name: 'album_discovery', 
+          visibility_timeout: 0,
+          batch_size: 1
+        }
+      );
+      
+      // Count pending messages
+      const pendingMessagesCount = queueStats?.length || 0;
+      
+      return {
+        status: 'healthy',
+        queue: 'album_discovery',
+        pendingMessages: pendingMessagesCount,
+        workerTimeout: 120
+      };
+    } catch (e) {
+      return {
+        status: 'unhealthy',
+        error: e.message
+      };
+    }
+  }
 }
 
 const worker = new AlbumDiscoveryWorker();
@@ -170,6 +222,17 @@ serve(async (req: Request) => {
 
   try {
     logger.info('Album Discovery worker received request');
+    
+    // Handle health check endpoint
+    const url = new URL(req.url);
+    
+    if (url.pathname.endsWith('/health')) {
+      const healthStatus = await worker.getHealthStatus();
+      
+      return new Response(JSON.stringify(healthStatus), { 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      });
+    }
     
     if (req.method === 'POST') {
       const body = await req.json().catch(() => ({}));

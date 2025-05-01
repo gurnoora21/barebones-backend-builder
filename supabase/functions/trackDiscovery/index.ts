@@ -7,6 +7,7 @@ import { logger, generateTraceId } from "../lib/logger.ts";
 import { createDbTransactionHelpers } from "../lib/dbHelpers.ts";
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 import { Database } from "../types.ts";
+import { validate as uuidValidate } from "https://deno.land/std@0.178.0/uuid/mod.ts";
 
 interface TrackDiscoveryMsg {
   albumId: string;
@@ -61,7 +62,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   private batchSize = 3; // Reduced from 10 to 3 to reduce concurrency
   
   constructor() {
-    super('track_discovery', 60);
+    super('track_discovery', 120); // Increased timeout from 60 to 120 seconds
   }
 
   private normalizeTrackName(name: string): string {
@@ -95,6 +96,12 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   private async checkExistingTracks(normalizedNames: string[], artistUuid: string): Promise<Set<string>> {
     if (normalizedNames.length === 0) return new Set<string>();
     
+    // Validate artistUuid is a valid UUID
+    if (!this.isValidUuid(artistUuid)) {
+      this.workerLogger.warn(`Invalid artist UUID format: ${artistUuid}`);
+      return new Set<string>();
+    }
+    
     const dbHelpers = createDbTransactionHelpers(this.supabase as SupabaseClient<Database>);
     
     try {
@@ -119,6 +126,13 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
   }
   
   /**
+   * Helper method to validate UUID format
+   */
+  private isValidUuid(id: string): boolean {
+    return uuidValidate(id);
+  }
+  
+  /**
    * Create or update tracks in batches with proper transaction handling
    */
   private async createTracks(
@@ -127,6 +141,17 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     artistUuid: string
   ): Promise<Map<string, string>> {
     if (tracksWithDetails.length === 0) return new Map();
+    
+    // Validate UUIDs
+    if (!this.isValidUuid(albumUuid)) {
+      this.workerLogger.error(`Invalid album UUID format: ${albumUuid}`);
+      return new Map();
+    }
+    
+    if (!this.isValidUuid(artistUuid)) {
+      this.workerLogger.error(`Invalid artist UUID format: ${artistUuid}`);
+      return new Map();
+    }
     
     const traceId = generateTraceId();
     const contextLogger = this.workerLogger.child({ 
@@ -175,11 +200,33 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         });
         
         // 3. Prepare normalized track data for insertion
-        const normalizedTracksToInsert: NormalizedTrackData[] = tracksWithDetails.map(track => ({
-          normalized_name: track.normalizedName,
-          artist_id: artistUuid,
-          representative_track_id: track.id
-        }));
+        // Only proceed with valid track IDs from the previous operation
+        const normalizedTracksToInsert: NormalizedTrackData[] = [];
+        
+        for (const track of tracksWithDetails) {
+          const dbTrackId = trackIdMap.get(track.id);
+          
+          if (!dbTrackId) {
+            contextLogger.warn(`No database ID found for Spotify track ${track.id}, skipping normalized track entry`);
+            continue;
+          }
+          
+          if (!this.isValidUuid(dbTrackId)) {
+            contextLogger.warn(`Invalid track UUID: ${dbTrackId} for Spotify ID ${track.id}, skipping normalized track entry`);
+            continue;
+          }
+          
+          normalizedTracksToInsert.push({
+            normalized_name: track.normalizedName,
+            artist_id: artistUuid,
+            representative_track_id: dbTrackId // Use the database UUID, not the Spotify ID
+          });
+        }
+        
+        if (normalizedTracksToInsert.length === 0) {
+          contextLogger.warn('No valid normalized tracks to insert');
+          return trackIdMap;
+        }
         
         // 4. Insert normalized tracks in a batch
         const { error: normalizedError } = await withRetry(async () => {
@@ -196,6 +243,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           throw normalizedError;
         }
         
+        contextLogger.info(`Successfully inserted ${normalizedTracksToInsert.length} normalized tracks`);
         return trackIdMap;
       });
     } catch (error) {
@@ -221,6 +269,17 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     };
     
     if (tracks.length === 0) return stats;
+    
+    // Validate UUIDs
+    if (!this.isValidUuid(artistUuid)) {
+      this.workerLogger.error(`Invalid artist UUID format: ${artistUuid} - cannot process tracks`);
+      return stats;
+    }
+    
+    if (!this.isValidUuid(albumUuid)) {
+      this.workerLogger.error(`Invalid album UUID format: ${albumUuid} - cannot process tracks`);
+      return stats;
+    }
     
     const detailedTracks: TrackWithDetails[] = [];
     const normalizedNames: string[] = [];
@@ -262,6 +321,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
     });
     
     if (newTracks.length === 0) {
+      this.workerLogger.info(`No new tracks to process for album with ID: ${albumId}`);
       return stats;
     }
     
@@ -274,7 +334,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       for (const track of batch) {
         try {
           // Add delay between each track detail request
-          await wait(800); // Added delay between API calls
+          await wait(800); // Increased delay between API calls
           
           const trackDetails = await getTrackDetails(track.id);
           batchDetailedTracks.push({
@@ -296,9 +356,12 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       
       // Enqueue producer identification for successfully created tracks
       for (const track of batchDetailedTracks) {
-        if (trackUuids.has(track.id)) {
+        const trackUuid = trackUuids.get(track.id);
+        
+        if (trackUuid && this.isValidUuid(trackUuid)) {
           await this.enqueue('producer_identification', {
             trackId: track.id,
+            trackUuid: trackUuid, // Add database UUID to message
             trackName: track.name,
             albumId,
             artistId
@@ -306,12 +369,14 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
           
           this.workerLogger.debug(`Enqueued producer identification for track "${track.name}"`);
           stats.validCount++;
+        } else {
+          this.workerLogger.warn(`No valid UUID for track ${track.name} (Spotify ID: ${track.id}), skipping producer identification`);
         }
       }
       
       // Add a significant delay between batches to avoid rate limits
       if (i + this.batchSize < newTracks.length) {
-        await wait(2000); // Increased from 1000ms to 2000ms
+        await wait(2500); // Increased delay between batches
       }
     }
     
@@ -339,13 +404,17 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         .single();
 
       if (artistError || !artistData) {
-        throw new Error(`Artist ${artistId} not found in database`);
+        throw new Error(`Artist ${artistId} not found in database: ${artistError?.message || "No data returned"}`);
       }
 
       const artistUuid = artistData.id;
       
+      if (!this.isValidUuid(artistUuid)) {
+        throw new Error(`Invalid artist UUID format: ${artistUuid}`);
+      }
+      
       // Add delay before fetching tracks
-      await wait(500); // New delay before fetching album tracks
+      await wait(800); // Increased delay before fetching album tracks
       
       const tracks = await getAlbumTracks(albumId, offset);
       contextLogger.info(`Found ${tracks.items.length} potential tracks in album ${albumName}`);
@@ -357,7 +426,11 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
         .single();
 
       if (albumError || !album) {
-        throw new Error(`Album ${albumId} not found in database`);
+        throw new Error(`Album ${albumId} not found in database: ${albumError?.message || "No data returned"}`);
+      }
+      
+      if (!this.isValidUuid(album.id)) {
+        throw new Error(`Invalid album UUID format: ${album.id}`);
       }
       
       // Process tracks in batches
@@ -378,7 +451,7 @@ class TrackDiscoveryWorker extends PageWorker<TrackDiscoveryMsg> {
       // If we have more tracks to process, enqueue the next batch
       if (tracks.items.length > 0 && offset + tracks.items.length < tracks.total && stats.validCount > 0) {
         // Add more delay between pagination
-        await wait(2000); // Increased from default delay
+        await wait(2500); // Increased delay between page requests
         
         const newOffset = offset + tracks.items.length;
         await this.enqueue('track_discovery', {
@@ -431,7 +504,10 @@ serve(async (req: Request) => {
   } catch (error) {
     logger.error("Worker execution error:", error);
     
-    return new Response(JSON.stringify({ error: error.message }), { 
+    return new Response(JSON.stringify({ 
+      error: error.message,
+      details: error.stack 
+    }), { 
       status: 500, 
       headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
     });
