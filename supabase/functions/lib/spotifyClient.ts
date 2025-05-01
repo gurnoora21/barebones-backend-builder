@@ -1,4 +1,3 @@
-
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 let spotifyAccessToken: string | null = null;
 let spotifyTokenExpiry = 0;
@@ -13,9 +12,35 @@ import { getEnvConfig } from './dbHelpers.ts';
 const spotifyLogger = logger.child({ service: 'SpotifyAPI' });
 const env = getEnvConfig();
 
-// Track concurrency for backpressure control
-let concurrentRequests = 0;
-const MAX_CONCURRENT = 2; // Reduced from 5 to 2 to prevent rate limiting
+// Define endpoint types for better tracking
+type EndpointType = 'artists' | 'albums' | 'tracks' | 'token' | 'other';
+
+// Track concurrency for backpressure control with endpoint-specific pools
+interface ConcurrencyPool {
+  currentCount: number;
+  maxConcurrent: number;
+}
+
+const endpointPools = new Map<EndpointType, ConcurrencyPool>();
+const DEFAULT_MAX_CONCURRENT = 2; // Default value preserved from original code
+
+// Initialize default pools for each endpoint type
+function initializePool(endpoint: EndpointType, maxConcurrent: number = DEFAULT_MAX_CONCURRENT): ConcurrencyPool {
+  if (!endpointPools.has(endpoint)) {
+    endpointPools.set(endpoint, {
+      currentCount: 0,
+      maxConcurrent
+    });
+  }
+  return endpointPools.get(endpoint)!;
+}
+
+// Initialize default pools
+initializePool('artists', 2);
+initializePool('albums', 1); // More conservative for album endpoints
+initializePool('tracks', 2);
+initializePool('token', 1); // Token requests should be strictly limited
+initializePool('other', 1);
 
 // Defaults for rate limit handling
 const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 60; // Default retry after 1 minute if no header
@@ -50,7 +75,7 @@ async function refreshSpotifyToken(): Promise<void> {
           'Content-Type': 'application/x-www-form-urlencoded' 
         },
         body: 'grant_type=client_credentials',
-      });
+      }, 'token'); // Use token endpoint pool
     }, {
       maxAttempts: 5,
       initialDelayMs: 1000,
@@ -135,9 +160,30 @@ function getReasonableRetryDelay(headers: Headers): number {
   return Math.min(suggestedDelay, MAX_RATE_LIMIT_RETRY_SECONDS * 1000);
 }
 
+/**
+ * Determine which endpoint type a path belongs to
+ */
+function determineEndpointType(path: string): EndpointType {
+  if (path.includes('artists')) {
+    return 'artists';
+  } else if (path.includes('albums')) {
+    return 'albums';
+  } else if (path.includes('tracks')) {
+    return 'tracks';
+  } else if (path === SPOTIFY_TOKEN_URL) {
+    return 'token';
+  } else {
+    return 'other';
+  }
+}
+
 /** Call Spotify API with the proper token and retry logic */
 export async function spotifyApi<T>(path: string, options: { timeout?: number } = {}, retries = 3): Promise<T> {
-  const contextLogger = spotifyLogger.child({ operation: path.split('?')[0] });
+  const endpointType = determineEndpointType(`${path}`);
+  const contextLogger = spotifyLogger.child({ 
+    operation: path.split('?')[0],
+    endpointType
+  });
   
   // Create a unique cache key for this request
   const cacheKey = `spotify-api:${path}`;
@@ -145,23 +191,24 @@ export async function spotifyApi<T>(path: string, options: { timeout?: number } 
   // Try to get from cache first, with a 10 min TTL for most Spotify data
   // This avoids hitting rate limits and speeds up responses
   return globalCache.getOrFetch<T>(cacheKey, async () => {
-    // Use specialized rate limit circuit breaker for Spotify API calls
+    // Use endpoint-specific circuit breaker with more granular control
+    const endpointCircuitName = `spotify-${endpointType}-circuit`;
+    const endpointCircuit = CircuitBreakerRegistry.getOrCreate({
+      name: endpointCircuitName,
+      failureThreshold: 8, // Allow more failures before tripping for specific endpoints
+      resetTimeoutMs: 15 * 60 * 1000, // 15 minutes
+      halfOpenSuccessThreshold: 2
+    });
+    
+    // Rate limit circuit breaker - keep a separate one for rate limits
     const rateLimitCircuit = CircuitBreakerRegistry.getOrCreate({
-      name: 'spotify-rate-limit',
-      failureThreshold: 3, // Increased from 1 to 3 to make it less aggressive
+      name: `spotify-${endpointType}-rate-limit`,
+      failureThreshold: 3,
       resetTimeoutMs: 60 * 60 * 1000, // 1 hour default, but we'll use Retry-After when available
       halfOpenSuccessThreshold: 1
     });
     
-    // General API circuit breaker
-    const apiCircuit = CircuitBreakerRegistry.getOrCreate({
-      name: 'spotify-api',
-      failureThreshold: 10, // Increased from 5 to 10 to prevent opening too easily
-      resetTimeoutMs: 15 * 60 * 1000, // 15 minutes (reduced from 1 hour)
-      halfOpenSuccessThreshold: 2
-    });
-    
-    return apiCircuit.fire(async () => {
+    return endpointCircuit.fire(async () => {
       return withRateLimitedRetry(async () => {
         const token = await ensureToken();
         
@@ -171,11 +218,11 @@ export async function spotifyApi<T>(path: string, options: { timeout?: number } 
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         
         try {
-          // Use controlledFetch to implement backpressure
+          // Use controlledFetch to implement backpressure with endpoint-specific pool
           const res = await controlledFetch(`https://api.spotify.com/v1/${path}`, {
             headers: { 'Authorization': `Bearer ${token}` },
             signal: controller.signal
-          });
+          }, endpointType);
           
           clearTimeout(timeoutId);
           
@@ -185,30 +232,33 @@ export async function spotifyApi<T>(path: string, options: { timeout?: number } 
               // Get a reasonable retry delay
               const retryDelay = getReasonableRetryDelay(res.headers);
               
-              contextLogger.warn(`Rate limited by Spotify, waiting for ${retryDelay}ms before retry`, {
+              contextLogger.warn(`Rate limited by Spotify ${endpointType} endpoint, waiting for ${retryDelay}ms before retry`, {
                 retryAfter: res.headers.get('Retry-After'),
                 path,
-                cappedDelay: retryDelay
+                cappedDelay: retryDelay,
+                endpoint: endpointType
               });
               
               // Tell the rate limit circuit about this failure
               await rateLimitCircuit.recordFailure(res, retryDelay); // Pass the capped delay
               
               // Let the retry mechanism handle this
-              const error = new Error(`Spotify API rate limited`);
+              const error = new Error(`Spotify API rate limited on ${endpointType} endpoint`);
               (error as any).status = 429;
               (error as any).headers = res.headers;
+              (error as any).endpointType = endpointType;
               throw error;
             } else {
               // This looks like a suspicious rate limit response
               contextLogger.warn('Received suspicious rate limit response, treating as regular error', {
                 path,
                 status: res.status,
-                headers: Object.fromEntries(res.headers.entries())
+                headers: Object.fromEntries(res.headers.entries()),
+                endpoint: endpointType
               });
               
               // Treat as a regular error, not a rate limit
-              const error = new Error(`Suspicious rate limit response`);
+              const error = new Error(`Suspicious rate limit response on ${endpointType} endpoint`);
               (error as any).status = res.status;
               throw error;
             }
@@ -216,9 +266,10 @@ export async function spotifyApi<T>(path: string, options: { timeout?: number } 
           
           if (!res.ok) {
             const errorText = await res.text();
-            const error = new Error(`Spotify API error: ${res.status} ${res.statusText}. Details: ${errorText}`);
+            const error = new Error(`Spotify ${endpointType} API error: ${res.status} ${res.statusText}. Details: ${errorText}`);
             (error as any).status = res.status;
             (error as any).headers = res.headers;
+            (error as any).endpointType = endpointType;
             throw error;
           }
           
@@ -230,20 +281,56 @@ export async function spotifyApi<T>(path: string, options: { timeout?: number } 
           
           // Handle AbortError specifically
           if (error.name === 'AbortError') {
-            throw new Error(`Spotify API request timed out for ${path}`);
+            throw new Error(`Spotify API request timed out for ${path} (${endpointType} endpoint)`);
           }
           
           throw error;
         }
-      }, 'spotify-api', {
+      }, `spotify-${endpointType}-api`, {
         maxAttempts: retries,
-        initialDelayMs: 2000,
-        maxDelayMs: 30000,
-        factor: 1.5,
+        initialDelayMs: getInitialDelayForEndpoint(endpointType),
+        maxDelayMs: 30000, 
+        factor: getBackoffFactorForEndpoint(endpointType),
         jitter: true
       });
     });
   }, 600000); // 10 minute cache TTL for Spotify data
+}
+
+/**
+ * Get initial delay based on endpoint type
+ */
+function getInitialDelayForEndpoint(endpointType: EndpointType): number {
+  switch (endpointType) {
+    case 'albums':
+      return 3000; // Albums need more conservative backoff
+    case 'artists':
+      return 2000; 
+    case 'tracks':
+      return 2000;
+    case 'token':
+      return 5000; // Token refreshes need more time
+    default:
+      return 2000;
+  }
+}
+
+/**
+ * Get backoff factor based on endpoint type
+ */
+function getBackoffFactorForEndpoint(endpointType: EndpointType): number {
+  switch (endpointType) {
+    case 'albums':
+      return 2.0; // Albums use standard backoff
+    case 'artists':
+      return 1.5; // Artists can be slightly more aggressive
+    case 'tracks':
+      return 1.5;
+    case 'token':
+      return 3.0; // Token refreshes need more conservative backoff
+    default:
+      return 2.0;
+  }
 }
 
 // Helper function to verify artist is primary on a Spotify item
@@ -316,22 +403,77 @@ export async function getTrackDetails(trackId: string): Promise<any> {
   );
 }
 
-// Backpressure-aware fetch wrapper
-export async function controlledFetch(url: string, options?: RequestInit): Promise<Response> {
-  // Wait until we're under concurrency limit
-  while (concurrentRequests >= MAX_CONCURRENT) {
+// Backpressure-aware fetch wrapper with endpoint-specific concurrency control
+export async function controlledFetch(url: string, options?: RequestInit, endpointType: EndpointType = 'other'): Promise<Response> {
+  // Get or create pool for this endpoint
+  const pool = endpointPools.get(endpointType) || initializePool(endpointType);
+  
+  // Wait until we're under concurrency limit for this endpoint
+  while (pool.currentCount >= pool.maxConcurrent) {
     await wait(200);
   }
   
-  concurrentRequests++;
+  pool.currentCount++;
+  spotifyLogger.debug(`API request started for ${endpointType} endpoint (${pool.currentCount}/${pool.maxConcurrent})`);
+  
   try {
     return await fetch(url, options);
   } finally {
-    concurrentRequests--;
-    // Add small delay between requests to prevent rate limit issues
-    await wait(250);
+    pool.currentCount--;
+    // Add endpoint-specific delay between requests to prevent rate limit issues
+    const delayMs = getEndpointCooldown(endpointType);
+    spotifyLogger.debug(`API request completed for ${endpointType} endpoint, cooling down for ${delayMs}ms`);
+    await wait(delayMs);
+  }
+}
+
+/**
+ * Get appropriate cooldown delay for each endpoint type
+ */
+function getEndpointCooldown(endpointType: EndpointType): number {
+  switch (endpointType) {
+    case 'albums':
+      return 350; // Albums need more cooldown
+    case 'artists':
+      return 300;
+    case 'tracks':
+      return 250;
+    case 'token':
+      return 500; // Token refreshes need more cooldown
+    default:
+      return 250; // Default from original code
   }
 }
 
 // Add export for wait function
 export { wait } from './retry.ts';
+
+// Export pool utilities for testing and monitoring
+export function getEndpointPoolStatus(): Record<string, { current: number, max: number }> {
+  const status: Record<string, { current: number, max: number }> = {};
+  
+  for (const [endpoint, pool] of endpointPools.entries()) {
+    status[endpoint] = {
+      current: pool.currentCount,
+      max: pool.maxConcurrent
+    };
+  }
+  
+  return status;
+}
+
+// Allow updating pool limits at runtime (useful for dynamic configuration)
+export function updateEndpointPoolLimit(endpoint: EndpointType, maxConcurrent: number): void {
+  if (maxConcurrent < 1) {
+    throw new Error(`Invalid concurrency limit: ${maxConcurrent}. Must be at least 1.`);
+  }
+  
+  const pool = endpointPools.get(endpoint);
+  if (pool) {
+    spotifyLogger.info(`Updating ${endpoint} endpoint concurrency limit: ${pool.maxConcurrent} -> ${maxConcurrent}`);
+    pool.maxConcurrent = maxConcurrent;
+  } else {
+    initializePool(endpoint, maxConcurrent);
+    spotifyLogger.info(`Created new ${endpoint} endpoint pool with concurrency limit: ${maxConcurrent}`);
+  }
+}

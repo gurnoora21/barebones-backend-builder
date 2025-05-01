@@ -162,6 +162,9 @@ export class CircuitBreaker {
       (error.message && error.message.includes('rate limit'))
     );
     
+    // Extract endpoint type for more granular circuit breaker logic
+    const endpointType = error?.endpointType || 'unknown';
+    
     // Log detailed information about failures
     this.logger.debug(`Circuit ${this.options.name} failure #${this.failureCount}`, {
       isRateLimitError,
@@ -169,7 +172,8 @@ export class CircuitBreaker {
       state: this.state,
       errorStatus: error?.status,
       errorMessage: error?.message,
-      customTimeout: this.customResetTimeout
+      customTimeout: this.customResetTimeout,
+      endpointType
     });
     
     // For rate limit circuits, be more conservative about opening
@@ -187,7 +191,12 @@ export class CircuitBreaker {
     
     if (shouldOpenCircuit) {
       await this.changeState(CircuitState.OPEN);
-      this.logger.warn(`Circuit ${this.options.name} opened after ${this.failureCount} failures`);
+      this.logger.warn(`Circuit ${this.options.name} opened after ${this.failureCount} failures`, {
+        endpoint: endpointType,
+        failures: this.failureCount,
+        threshold: this.options.failureThreshold,
+        resetTimeout: this.customResetTimeout || this.options.resetTimeoutMs
+      });
     } else if (this.state === CircuitState.HALF_OPEN) {
       await this.changeState(CircuitState.OPEN);
       this.logger.warn(`Circuit ${this.options.name} reopened after failed test`);
@@ -358,27 +367,62 @@ export class CircuitBreakerRegistry {
     const circuitName = options.name;
     
     if (!this.circuits.has(circuitName)) {
-      // Update default values for spotify-api circuit breaker
-      if (circuitName === 'spotify-api') {
-        // Adjust settings for more resilience
-        this.logger.info(`Creating spotify-api circuit breaker with tuned settings`);
-        options.failureThreshold = 10; // Increased from 5 to 10
-        options.resetTimeoutMs = 15 * 60 * 1000; // 15 minutes instead of 1 hour
-        options.halfOpenSuccessThreshold = 1; // Reduced from 2 to 1
-      } else if (circuitName === 'spotify-rate-limit') {
-        // Special settings for rate limit circuit
-        this.logger.info(`Creating spotify-rate-limit circuit breaker with special settings`);
-        options.failureThreshold = 3; // Increased from 1 to 3 - less aggressive
-        options.resetTimeoutMs = 60 * 60 * 1000; // 1 hour default, but we'll use Retry-After when available
-        options.halfOpenSuccessThreshold = 1;
-      }
+      const defaultSettings = this.getDefaultSettingsForCircuit(circuitName);
+      const finalOptions = {
+        ...options,
+        ...defaultSettings
+      };
       
-      this.logger.debug(`Creating new circuit breaker: ${circuitName}`, options);
-      const circuit = new CircuitBreaker(options, this.supabaseClient);
+      this.logger.debug(`Creating new circuit breaker: ${circuitName}`, finalOptions);
+      const circuit = new CircuitBreaker(finalOptions, this.supabaseClient);
       this.circuits.set(circuitName, circuit);
     }
     
     return this.circuits.get(circuitName)!;
+  }
+  
+  private static getDefaultSettingsForCircuit(name: string): Partial<CircuitBreakerOptions> {
+    // Apply different default settings based on circuit name
+    if (name.includes('artists')) {
+      return {
+        failureThreshold: 8,
+        resetTimeoutMs: 15 * 60 * 1000,
+        halfOpenSuccessThreshold: 2
+      };
+    } else if (name.includes('albums')) {
+      return {
+        failureThreshold: 6,
+        resetTimeoutMs: 10 * 60 * 1000,
+        halfOpenSuccessThreshold: 1
+      };
+    } else if (name.includes('tracks')) {
+      return {
+        failureThreshold: 8,
+        resetTimeoutMs: 10 * 60 * 1000,
+        halfOpenSuccessThreshold: 2
+      };
+    } else if (name === 'spotify-token-refresh') {
+      return {
+        failureThreshold: 3,
+        resetTimeoutMs: 60 * 60 * 1000,
+        halfOpenSuccessThreshold: 1
+      };
+    } else if (name.includes('rate-limit')) {
+      return {
+        failureThreshold: 3,
+        resetTimeoutMs: 60 * 60 * 1000,
+        halfOpenSuccessThreshold: 1
+      };
+    } else if (name.includes('api')) {
+      return {
+        failureThreshold: 10, 
+        resetTimeoutMs: 15 * 60 * 1000,
+        halfOpenSuccessThreshold: 2
+      };
+    }
+    
+    // Default settings
+    return {};
   }
   
   static async reset(name: string): Promise<void> {
@@ -393,6 +437,27 @@ export class CircuitBreakerRegistry {
   
   static async getAllStatuses(): Promise<any[]> {
     return Array.from(this.circuits.values()).map(circuit => circuit.getStatus());
+  }
+  
+  static async resetEndpointCircuits(endpointPrefix: string): Promise<number> {
+    let resetCount = 0;
+    const circuitNames: string[] = [];
+    
+    for (const [name, circuit] of this.circuits.entries()) {
+      if (name.includes(endpointPrefix)) {
+        circuitNames.push(name);
+        await circuit.reset();
+        resetCount++;
+      }
+    }
+    
+    if (resetCount > 0) {
+      this.logger.info(`Reset ${resetCount} ${endpointPrefix} circuit breakers`, {
+        circuits: circuitNames
+      });
+    }
+    
+    return resetCount;
   }
   
   static async loadFromStorage(): Promise<void> {
@@ -428,3 +493,4 @@ export class CircuitBreakerRegistry {
     }
   }
 }
+

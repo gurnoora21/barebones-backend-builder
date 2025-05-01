@@ -15,7 +15,7 @@ export interface RetryOptions {
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxAttempts: 3,
   initialDelayMs: 1000,
-  maxDelayMs: 30000,
+  maxDelayMs: 30000, // 30s default max delay
   factor: 2, // Double the delay on each retry
   jitter: true, // Apply jitter by default
 };
@@ -115,10 +115,12 @@ export function getRetryDelayFromHeaders(headers: Headers): number | null {
   try {
     const date = new Date(retryAfter);
     if (!isNaN(date.getTime())) {
-      return date.getTime() - Date.now();
+      const delay = date.getTime() - Date.now();
+      return delay > 0 ? delay : null; // Only return positive delays
     }
   } catch (e) {
     // Invalid date format
+    logger.debug(`Failed to parse Retry-After header as date: ${retryAfter}`);
   }
   
   return null; // Could not parse
@@ -154,10 +156,18 @@ export async function withRetry<T>(
   options: Partial<RetryOptions> = {}
 ): Promise<T> {
   // Merge with default options
-  const retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...options };
+  const retryOptions: RetryOptions = { 
+    ...DEFAULT_RETRY_OPTIONS, 
+    ...options,
+    // Always ensure a reasonable max delay (1 hour)
+    maxDelayMs: Math.min(options.maxDelayMs || DEFAULT_RETRY_OPTIONS.maxDelayMs!, 60 * 60 * 1000)
+  };
+  
   const retryLogger = logger.child({ operation: 'retry' });
   
   let attempt = 1;
+  let totalWaitTime = 0;
+  const MAX_CUMULATIVE_WAIT = 30 * 60 * 1000; // Maximum 30 minute cumulative wait
   
   while (true) {
     try {
@@ -168,7 +178,8 @@ export async function withRetry<T>(
         retryLogger.error(`Max retry attempts (${retryOptions.maxAttempts}) reached. Giving up.`, { 
           error: error.message,
           stack: error.stack,
-          attempt
+          attempt,
+          totalWaitTime
         });
         throw error;
       }
@@ -188,6 +199,15 @@ export async function withRetry<T>(
         throw error;
       }
       
+      // Check if we've exceeded cumulative wait time
+      if (totalWaitTime >= MAX_CUMULATIVE_WAIT) {
+        retryLogger.warn(`Exceeded maximum cumulative wait time of ${MAX_CUMULATIVE_WAIT}ms. Giving up.`, {
+          totalWaitTime,
+          attempt
+        });
+        throw error;
+      }
+      
       // Calculate delay for next retry
       let delay = calculateRetryDelay(attempt, retryOptions);
       
@@ -198,18 +218,29 @@ export async function withRetry<T>(
           // Cap retry delay to 1 hour maximum
           const MAX_RETRY_DELAY = 60 * 60 * 1000; // 1 hour
           delay = Math.min(retryAfterMs, MAX_RETRY_DELAY);
-          retryLogger.info(`Using capped Retry-After header value: ${delay}ms`);
+          retryLogger.info(`Using capped Retry-After header value: ${delay}ms`, {
+            original: retryAfterMs,
+            capped: delay,
+            header: error.headers.get('Retry-After')
+          });
+        } else {
+          // If rate limited but no valid header, use a reasonable default
+          delay = Math.min(60 * 1000, delay * 2); // At least 1 minute, but respect max
+          retryLogger.info(`Using default rate limit delay: ${delay}ms (no valid Retry-After header)`);
         }
       }
       
       retryLogger.warn(`Retry attempt ${attempt}/${retryOptions.maxAttempts} after ${delay}ms delay`, {
         error: error.message,
         category: errorCategory,
-        statusCode: error.status || error.statusCode
+        statusCode: error.status || error.statusCode,
+        totalWaitTime: totalWaitTime + delay,
+        attempt
       });
       
       // Wait before next attempt
       await wait(delay);
+      totalWaitTime += delay;
       attempt++;
     }
   }
@@ -239,6 +270,8 @@ export async function withRateLimitedRetry<T>(
   };
   
   let attempt = 1;
+  let totalWaitTime = 0;
+  const MAX_CUMULATIVE_WAIT = 30 * 60 * 1000; // Maximum 30 minutes cumulative wait
   
   while (true) {
     try {
@@ -247,7 +280,19 @@ export async function withRateLimitedRetry<T>(
       if (attempt >= rateLimitOptions.maxAttempts) {
         retryLogger.error(`Max rate limit retry attempts reached.`, { 
           attempt, 
-          error: error.message
+          error: error.message,
+          totalWaitTime,
+          resource: resourceKey
+        });
+        throw error;
+      }
+      
+      // Check if we've exceeded cumulative wait time
+      if (totalWaitTime >= MAX_CUMULATIVE_WAIT) {
+        retryLogger.warn(`Exceeded maximum cumulative wait time of ${MAX_CUMULATIVE_WAIT}ms. Giving up.`, {
+          totalWaitTime,
+          attempt,
+          resource: resourceKey
         });
         throw error;
       }
@@ -265,10 +310,24 @@ export async function withRateLimitedRetry<T>(
           const MAX_RETRY_DELAY = 60 * 60 * 1000; // 1 hour
           delay = Math.min(retryAfterMs, MAX_RETRY_DELAY);
           
+          retryLogger.info(`Using Retry-After header value: ${delay}ms`, {
+            original: retryAfterMs,
+            capped: delay,
+            header: error.headers.get('Retry-After'),
+            resource: resourceKey
+          });
+          
           if (retryAfterMs > MAX_RETRY_DELAY) {
             retryLogger.warn(`Capping excessive retry delay ${retryAfterMs}ms to ${MAX_RETRY_DELAY}ms`);
           }
         }
+      } else if (isRateLimit) {
+        // Rate limit without header - use conservative default
+        delay = Math.min(DEFAULT_RETRY_OPTIONS.initialDelayMs * Math.pow(4, attempt), 60 * 60 * 1000);
+        retryLogger.info(`Using default rate limit backoff: ${delay}ms (no valid headers)`, {
+          attempt,
+          resource: resourceKey
+        });
       }
       
       retryLogger.warn(`Rate limit retry for ${resourceKey}`, {
@@ -277,11 +336,56 @@ export async function withRateLimitedRetry<T>(
         isRateLimit,
         error: error.message,
         status: error.status,
-        headers: error.headers ? JSON.stringify(error.headers) : undefined
+        endpoint: error.endpointType,
+        totalWaitSoFar: totalWaitTime,
+        headers: error.headers ? JSON.stringify(Object.fromEntries(error.headers.entries())) : undefined
       });
       
       await wait(delay);
+      totalWaitTime += delay;
       attempt++;
     }
   }
+}
+
+/**
+ * Create a limited concurrency queue for parallel operations
+ * @param maxConcurrent Maximum number of operations to run in parallel
+ */
+export function createConcurrencyLimiter(maxConcurrent: number = 3) {
+  if (maxConcurrent < 1) throw new Error('maxConcurrent must be at least 1');
+  
+  const queue: Array<{
+    fn: () => Promise<any>;
+    resolve: (value: any) => void;
+    reject: (reason: any) => void;
+  }> = [];
+  
+  let activeCount = 0;
+  
+  // Process the next item in the queue
+  async function processNext() {
+    if (activeCount >= maxConcurrent || queue.length === 0) return;
+    
+    const { fn, resolve, reject } = queue.shift()!;
+    activeCount++;
+    
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    } finally {
+      activeCount--;
+      processNext();
+    }
+  }
+  
+  // Add a task to the queue
+  return function limit<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      processNext();
+    });
+  };
 }
